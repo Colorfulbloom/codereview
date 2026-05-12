@@ -874,4 +874,4 @@ The smallest useful config — just override the model:
 model: gemma4
 ```
 
-Everything else uses defaults: all languages auto-detected, all 32 built-in rules enabled, terminal output.
+Everything else uses defaults: all languages auto-detected, all 43 built-in rules enabled, terminal output.

@@ -10,7 +10,7 @@ Built for development teams that cannot use paid AI platforms (Claude, ChatGPT, 
 
 - **Specialized sub-agents** -- Security, Bug Detection, Style, Accessibility, and Custom agents each make focused LLM calls for higher accuracy
 - **Local AI** -- uses Ollama with any model that fits your hardware. No data leaves your machine
-- **Language-aware** -- 32 built-in rules for PHP, Drupal, JavaScript, CSS, and HTML
+- **Language-aware** -- [43 built-in rules](#built-in-rules) for PHP, Drupal, JavaScript, CSS, HTML/Twig, and YAML
 - **Interactive REPL** -- explore diffs, review code, commit, all from one session
 - **CI/CD ready** -- non-interactive mode with JSON, Markdown, and GitHub Actions annotation output
 - **Team configurable** -- shared `.codereview.yaml` for custom rules, custom agents, and rule overrides
@@ -125,7 +125,7 @@ When you run `/review`, the tool doesn't send one massive prompt to the LLM. Ins
 
 ### Why Multiple Agents?
 
-Local LLMs (especially 6-12GB models) produce significantly better results with focused, shorter prompts. Instead of one prompt with 32 rules asking "check everything," each agent gets 4-10 rules and a clear instruction like "Your ONLY job is to find security vulnerabilities." The LLM can focus and produce more accurate findings.
+Local LLMs (especially 6-12GB models) produce significantly better results with focused, shorter prompts. Instead of one prompt with 43 rules asking "check everything," each agent gets 4-10 rules and a clear instruction like "Your ONLY job is to find security vulnerabilities." The LLM can focus and produce more accurate findings.
 
 ### What Gets Skipped
 
@@ -304,7 +304,7 @@ agents:
 - **Create custom agents** -- specialized reviewers with their own system prompts (PCI-DSS, Laravel, performance, etc.)
 - **Set model and output format** -- per-project defaults
 
-Full reference with all 32 rule IDs, custom agent schema, and real-world examples: **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**
+Full reference with all 43 rule IDs, custom agent schema, and real-world examples: **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**
 
 ---
 
