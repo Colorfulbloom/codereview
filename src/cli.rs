@@ -1,0 +1,104 @@
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Parser)]
+#[command(
+    name = "code-review",
+    version,
+    about = "AI-powered local code review using Ollama"
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
+    /// Run a review without entering the REPL (non-interactive mode).
+    /// Specify what to diff: a branch name, HEAD~N, or a commit hash.
+    #[arg(long, value_name = "REF")]
+    pub diff: Option<String>,
+
+    /// Output format for non-interactive mode.
+    #[arg(long, value_enum, default_value = "terminal")]
+    pub format: OutputFormat,
+
+    /// Override the Ollama model.
+    #[arg(long, short)]
+    pub model: Option<String>,
+
+    /// Output file path (for markdown/json formats).
+    #[arg(long, short)]
+    pub output: Option<String>,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum OutputFormat {
+    Terminal,
+    Json,
+    Markdown,
+    Annotations,
+}
+
+#[derive(Subcommand)]
+pub enum Command {
+    /// Run the onboarding wizard (re-runnable at any time)
+    Onboard {
+        /// Start fresh, ignoring any prior progress
+        #[arg(long)]
+        reset: bool,
+    },
+    /// Generate a .codereview.yaml configuration file for your project
+    Init,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_format_variants() {
+        // Verify all variants exist and parse
+        let _t: OutputFormat = OutputFormat::Terminal;
+        let _j: OutputFormat = OutputFormat::Json;
+        let _m: OutputFormat = OutputFormat::Markdown;
+        let _a: OutputFormat = OutputFormat::Annotations;
+    }
+
+    #[test]
+    fn cli_parses_no_args() {
+        let cli = Cli::parse_from(["code-review"]);
+        assert!(cli.command.is_none());
+        assert!(cli.diff.is_none());
+        assert!(cli.model.is_none());
+    }
+
+    #[test]
+    fn cli_parses_diff_flag() {
+        let cli = Cli::parse_from(["code-review", "--diff", "main"]);
+        assert_eq!(cli.diff.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn cli_parses_format_flag() {
+        let cli = Cli::parse_from(["code-review", "--diff", "main", "--format", "json"]);
+        assert!(matches!(cli.format, OutputFormat::Json));
+    }
+
+    #[test]
+    fn cli_parses_model_flag() {
+        let cli = Cli::parse_from(["code-review", "-m", "gemma4"]);
+        assert_eq!(cli.model.as_deref(), Some("gemma4"));
+    }
+
+    #[test]
+    fn cli_parses_output_flag() {
+        let cli = Cli::parse_from(["code-review", "--diff", "main", "-o", "report.md"]);
+        assert_eq!(cli.output.as_deref(), Some("report.md"));
+    }
+
+    #[test]
+    fn cli_parses_onboard_subcommand() {
+        let cli = Cli::parse_from(["code-review", "onboard", "--reset"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Onboard { reset: true })
+        ));
+    }
+}
