@@ -535,6 +535,27 @@ Inherits all PHP rules with `drupal-` prefix, plus:
 | `html-link-text` | warning |
 | `html-contrast` | warning |
 
+### Twig (reviewed as HTML)
+
+| Rule ID | Default Severity |
+|---------|-----------------|
+| `twig-no-raw` | error |
+| `twig-autoescape` | warning |
+| `twig-trans` | warning |
+| `twig-no-php` | error |
+| `twig-attach-library` | warning |
+| `twig-undefined-vars` | error |
+
+### YAML
+
+| Rule ID | Default Severity |
+|---------|-----------------|
+| `yaml-valid-syntax` | error |
+| `yaml-consistent-indent` | warning |
+| `yaml-no-duplicate-keys` | error |
+| `yaml-quote-special-values` | warning |
+| `yaml-no-hardcoded-secrets` | error |
+
 ---
 
 ## Verifying Your Configuration

@@ -296,6 +296,8 @@ agents:
 | HTML + Twig | 12 | Alt text, semantic elements, WCAG 2.2, Twig undefined vars, raw filter, trans |
 | YAML | 5 | Valid syntax, indentation, duplicate keys, special values, no secrets |
 
+See [all 43 rule IDs with severities](docs/CONFIGURATION.md#all-built-in-rule-ids) in the configuration reference.
+
 ### What You Can Configure
 
 - **Exclude files and directories** -- skip `.lando.yml`, `vendor/`, `*.log`, etc.
