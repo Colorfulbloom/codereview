@@ -1,4 +1,4 @@
-# code-review
+# Code Review
 
 AI-powered local code review using [Ollama](https://ollama.com). Your code never leaves your machine.
 
@@ -30,14 +30,14 @@ Built for development teams that cannot use paid AI platforms (Claude, ChatGPT, 
 
 ### Recommended Models
 
-| Model | RAM Needed | Best For |
-|-------|-----------|----------|
-| `gemma4` | ~6GB | Fast reviews, smaller edits |
-| `qwen2.5-coder:14b` | ~10GB | Strong code specialist |
-| `devstral:24b` | ~15GB | Deep agentic analysis |
-| `qwen3-coder:30b` | ~20GB | Best overall quality, 256K context |
-| `qwen2.5-coder:32b` | ~22GB | Highest accuracy |
-| `llama3.3:70b` | ~48GB | Excellent all-rounder (64GB+ systems) |
+| Model               | RAM Needed | Best For                              |
+| ------------------- | ---------- | ------------------------------------- |
+| `gemma4`            | ~6GB       | Fast reviews, smaller edits           |
+| `qwen2.5-coder:14b` | ~10GB      | Strong code specialist                |
+| `devstral:24b`      | ~15GB      | Deep agentic analysis                 |
+| `qwen3-coder:30b`   | ~20GB      | Best overall quality, 256K context    |
+| `qwen2.5-coder:32b` | ~22GB      | Highest accuracy                      |
+| `llama3.3:70b`      | ~48GB      | Excellent all-rounder (64GB+ systems) |
 
 ```bash
 ollama pull gemma4
@@ -143,30 +143,30 @@ Launch the REPL with `code-review`. The prompt is `cr>`. Tab completion is suppo
 
 ### Review
 
-| Command | Description |
-|---------|-------------|
-| `/review` | Run a code review on your current changes |
-| `/diff` | View the current diff (colored: green = added, red = removed) |
-| `/rules` | Show active review rules per detected language |
-| `/commit` | Stage files and commit with an AI-generated message |
+| Command   | Description                                                   |
+| --------- | ------------------------------------------------------------- |
+| `/review` | Run a code review on your current changes                     |
+| `/diff`   | View the current diff (colored: green = added, red = removed) |
+| `/rules`  | Show active review rules per detected language                |
+| `/commit` | Stage files and commit with an AI-generated message           |
 
 ### Configuration
 
-| Command | Description |
-|---------|-------------|
-| `/config` | View current configuration |
-| `/output` | Set output format |
-| `/models` | List available Ollama models (shows active model) |
-| `/init` | Generate a `.codereview.yaml` for your project |
-| `/onboard` | Re-run the onboarding wizard |
+| Command    | Description                                       |
+| ---------- | ------------------------------------------------- |
+| `/config`  | View current configuration                        |
+| `/output`  | Set output format                                 |
+| `/models`  | List available Ollama models (shows active model) |
+| `/init`    | Generate a `.codereview.yaml` for your project    |
+| `/onboard` | Re-run the onboarding wizard                      |
 
 ### Session
 
-| Command | Description |
-|---------|-------------|
+| Command   | Description                                  |
+| --------- | -------------------------------------------- |
 | `/status` | Show branch, changed files, and active model |
-| `/help` | Show all available commands |
-| `/quit` | Exit the REPL |
+| `/help`   | Show all available commands                  |
+| `/quit`   | Exit the REPL                                |
 
 ---
 
@@ -193,19 +193,19 @@ code-review --diff main -m qwen3-coder:30b --format json
 
 ### CLI Flags
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--diff <REF>` | | Branch, commit, or ref to diff against | (enters REPL) |
-| `--format <FMT>` | | `terminal`, `json`, `markdown`, `annotations` | `terminal` |
-| `--model <NAME>` | `-m` | Override the Ollama model | (from onboarding) |
-| `--output <PATH>` | `-o` | Write output to file | (stdout) |
+| Flag              | Short | Description                                   | Default           |
+| ----------------- | ----- | --------------------------------------------- | ----------------- |
+| `--diff <REF>`    |       | Branch, commit, or ref to diff against        | (enters REPL)     |
+| `--format <FMT>`  |       | `terminal`, `json`, `markdown`, `annotations` | `terminal`        |
+| `--model <NAME>`  | `-m`  | Override the Ollama model                     | (from onboarding) |
+| `--output <PATH>` | `-o`  | Write output to file                          | (stdout)          |
 
 ### Subcommands
 
-| Command | Description |
-|---------|-------------|
+| Command               | Description                                           |
+| --------------------- | ----------------------------------------------------- |
 | `code-review onboard` | Run the onboarding wizard (`--reset` for fresh start) |
-| `code-review init` | Generate `.codereview.yaml` interactively |
+| `code-review init`    | Generate `.codereview.yaml` interactively             |
 
 ---
 
@@ -287,14 +287,14 @@ agents:
 
 ### Built-in Rules
 
-| Language | Rules | Examples |
-|----------|-------|---------|
-| PHP | 6 | PSR-12 style, type declarations, SQL injection, eval, secrets |
-| Drupal | 10 | All PHP rules + dependency injection, hook attributes, coding standards |
-| JavaScript | 6 | no-var, strict equality, error handling, XSS prevention |
-| CSS | 4 | No !important, nesting depth, duplicate selectors |
-| HTML + Twig | 12 | Alt text, semantic elements, WCAG 2.2, Twig undefined vars, raw filter, trans |
-| YAML | 5 | Valid syntax, indentation, duplicate keys, special values, no secrets |
+| Language    | Rules | Examples                                                                      |
+| ----------- | ----- | ----------------------------------------------------------------------------- |
+| PHP         | 6     | PSR-12 style, type declarations, SQL injection, eval, secrets                 |
+| Drupal      | 10    | All PHP rules + dependency injection, hook attributes, coding standards       |
+| JavaScript  | 6     | no-var, strict equality, error handling, XSS prevention                       |
+| CSS         | 4     | No !important, nesting depth, duplicate selectors                             |
+| HTML + Twig | 12    | Alt text, semantic elements, WCAG 2.2, Twig undefined vars, raw filter, trans |
+| YAML        | 5     | Valid syntax, indentation, duplicate keys, special values, no secrets         |
 
 See [all 43 rule IDs with severities](docs/CONFIGURATION.md#all-built-in-rule-ids) in the configuration reference.
 
@@ -394,13 +394,13 @@ cr> /status
 
 Languages are auto-detected from file extensions in your diff.
 
-| Language | Extensions |
-|----------|-----------|
-| PHP | `.php`, `.inc` |
-| Drupal | `.module`, `.install`, `.theme`, `.profile`, `.info.yml` |
-| JavaScript | `.js`, `.mjs`, `.cjs`, `.jsx`, `.ts`, `.tsx` |
-| CSS | `.css`, `.scss`, `.sass`, `.less` |
-| HTML | `.html`, `.htm`, `.twig` |
+| Language   | Extensions                                               |
+| ---------- | -------------------------------------------------------- |
+| PHP        | `.php`, `.inc`                                           |
+| Drupal     | `.module`, `.install`, `.theme`, `.profile`, `.info.yml` |
+| JavaScript | `.js`, `.mjs`, `.cjs`, `.jsx`, `.ts`, `.tsx`             |
+| CSS        | `.css`, `.scss`, `.sass`, `.less`                        |
+| HTML       | `.html`, `.htm`, `.twig`                                 |
 
 **Drupal auto-detection:** If your project contains `.info.yml` files, `.module` files, or `core/lib/Drupal`, all `.php` files are automatically promoted to Drupal and get Drupal-specific rules.
 
@@ -422,11 +422,11 @@ Multiple accounts are supported (useful for submodules across platforms).
 
 Onboarding state is stored in SQLite:
 
-| Platform | Path |
-|----------|------|
-| macOS | `~/Library/Application Support/code-review/code-review.db` |
-| Linux | `~/.local/share/code-review/code-review.db` |
-| Windows | `%APPDATA%\code-review\code-review.db` |
+| Platform | Path                                                       |
+| -------- | ---------------------------------------------------------- |
+| macOS    | `~/Library/Application Support/code-review/code-review.db` |
+| Linux    | `~/.local/share/code-review/code-review.db`                |
+| Windows  | `%APPDATA%\code-review\code-review.db`                     |
 
 **Reset:**
 
