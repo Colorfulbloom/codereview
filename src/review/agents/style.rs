@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use super::accessibility::A11Y_IDS;
 use super::bugs::BUG_SUFFIXES;
 use super::security::SECURITY_SUFFIXES;
-use super::{AgentError, JSON_SCHEMA, ReviewAgent, execute_agent, format_rules};
+use super::{AgentError, ContextBudget, JSON_SCHEMA, ReviewAgent, execute_agent, format_rules};
 use crate::git::FileDiff;
 use crate::language::Language;
 use crate::language::rules::Rule;
@@ -93,11 +93,12 @@ impl ReviewAgent for LanguageStyleAgent {
         diffs: &[FileDiff],
         model: &str,
         ollama: &dyn OllamaClient,
+        budget: ContextBudget,
     ) -> Result<Vec<ReviewFinding>, AgentError> {
         if self.rules.is_empty() {
             return Ok(vec![]);
         }
-        execute_agent(self.name(), &self.system_prompt(), diffs, model, ollama).await
+        execute_agent(self.name(), &self.system_prompt(), diffs, model, ollama, budget).await
     }
 }
 

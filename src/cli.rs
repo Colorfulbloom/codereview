@@ -15,6 +15,17 @@ pub struct Cli {
     #[arg(long, value_name = "REF")]
     pub diff: Option<String>,
 
+    /// Review a specific file or directory as-is, regardless of git state.
+    /// Every supported file under the path is reviewed (a module, a theme, or
+    /// any loose code). Implies non-interactive mode; takes precedence over --diff.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<String>,
+
+    /// Review all uncommitted changes (staged, unstaged, untracked) without
+    /// entering the REPL. Useful for pre-commit hooks and scripting.
+    #[arg(long)]
+    pub uncommitted: bool,
+
     /// Output format for non-interactive mode.
     #[arg(long, value_enum, default_value = "terminal")]
     pub format: OutputFormat,
@@ -73,6 +84,21 @@ mod tests {
     fn cli_parses_diff_flag() {
         let cli = Cli::parse_from(["code-review", "--diff", "main"]);
         assert_eq!(cli.diff.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn cli_parses_path_flag() {
+        let cli = Cli::parse_from(["code-review", "--path", "docroot/modules/custom/foo"]);
+        assert_eq!(cli.path.as_deref(), Some("docroot/modules/custom/foo"));
+        assert!(cli.diff.is_none());
+    }
+
+    #[test]
+    fn cli_parses_uncommitted_flag() {
+        let cli = Cli::parse_from(["code-review", "--uncommitted"]);
+        assert!(cli.uncommitted);
+        assert!(cli.diff.is_none());
+        assert!(cli.path.is_none());
     }
 
     #[test]

@@ -7,6 +7,7 @@ use crate::git::FileDiff;
 use crate::language::rules::Rule;
 use crate::language::{self, Language};
 use crate::onboarding::steps::OllamaClient;
+use crate::review::chunking::{ContextBudget, DEFAULT_CONTEXT_TOKENS};
 use crate::review::models::ReviewFinding;
 
 use super::accessibility::AccessibilityAgent;
@@ -43,6 +44,10 @@ pub async fn run_agents(
     let mut all_findings: Vec<ReviewFinding> = Vec::new();
     let mut runs: Vec<AgentRun> = Vec::new();
 
+    // Size the context window once for the whole run so every request fits the
+    // model and Ollama doesn't reload the model between calls.
+    let budget = resolve_context_budget(ollama, model, config).await;
+
     let is_drupal =
         language::is_drupal_project(&diffs.iter().map(|d| d.path.as_str()).collect::<Vec<_>>());
 
@@ -52,6 +57,7 @@ pub async fn run_agents(
         diffs,
         model,
         ollama,
+        budget,
         &on_agent_start,
         &mut all_findings,
         &mut runs,
@@ -64,6 +70,7 @@ pub async fn run_agents(
         diffs,
         model,
         ollama,
+        budget,
         &on_agent_start,
         &mut all_findings,
         &mut runs,
@@ -87,6 +94,7 @@ pub async fn run_agents(
             &lang_diffs,
             model,
             ollama,
+            budget,
             &on_agent_start,
             &mut all_findings,
             &mut runs,
@@ -106,6 +114,7 @@ pub async fn run_agents(
                     &a11y_diffs,
                     model,
                     ollama,
+                    budget,
                     &on_agent_start,
                     &mut all_findings,
                     &mut runs,
@@ -125,6 +134,7 @@ pub async fn run_agents(
                 &twig_diffs,
                 model,
                 ollama,
+                budget,
                 &on_agent_start,
                 &mut all_findings,
                 &mut runs,
@@ -146,6 +156,7 @@ pub async fn run_agents(
             diffs,
             model,
             ollama,
+            budget,
             &on_agent_start,
             &mut all_findings,
             &mut runs,
@@ -188,7 +199,7 @@ pub async fn run_agents(
         }
 
         on_agent_start(agent.name());
-        let findings = agent.review(&agent_diffs, model, ollama).await?;
+        let findings = agent.review(&agent_diffs, model, ollama, budget).await?;
         runs.push(AgentRun {
             agent_name: agent.name().to_string(),
             finding_count: findings.len(),
@@ -202,11 +213,13 @@ pub async fn run_agents(
     Ok((all_findings, runs))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_agent_if_applicable(
     agent: &dyn ReviewAgent,
     diffs: &[FileDiff],
     model: &str,
     ollama: &dyn OllamaClient,
+    budget: ContextBudget,
     on_start: &impl Fn(&str),
     all_findings: &mut Vec<ReviewFinding>,
     runs: &mut Vec<AgentRun>,
@@ -216,7 +229,7 @@ async fn run_agent_if_applicable(
     }
 
     on_start(agent.name());
-    let findings = agent.review(diffs, model, ollama).await?;
+    let findings = agent.review(diffs, model, ollama, budget).await?;
     runs.push(AgentRun {
         agent_name: agent.name().to_string(),
         finding_count: findings.len(),
@@ -224,6 +237,33 @@ async fn run_agent_if_applicable(
     });
     all_findings.extend(findings);
     Ok(())
+}
+
+/// Decide the per-request LLM options for this run: the configured context
+/// budget (or the built-in default) capped by the model's detected maximum,
+/// and `think: false` for thinking-capable models so review calls return JSON
+/// instead of burning the timeout on reasoning tokens.
+async fn resolve_context_budget(
+    ollama: &dyn OllamaClient,
+    model: &str,
+    config: &Config,
+) -> ContextBudget {
+    let desired = config
+        .max_context_tokens
+        .unwrap_or(DEFAULT_CONTEXT_TOKENS);
+
+    let num_ctx = match ollama.model_context_limit(model).await {
+        Some(model_max) => desired.min(model_max),
+        None => desired,
+    };
+
+    let think = if ollama.model_supports_thinking(model).await {
+        Some(false)
+    } else {
+        None
+    };
+
+    ContextBudget { num_ctx, think }
 }
 
 /// Filter diffs to files matching a specific language.
@@ -283,6 +323,20 @@ mod tests {
     use std::sync::Mutex;
 
     #[tokio::test]
+    async fn budget_disables_thinking_for_capable_models() {
+        let ollama = crate::review::testutil::MockOllama::with_response("[]").with_thinking();
+        let budget = resolve_context_budget(&ollama, "m", &Config::default()).await;
+        assert_eq!(budget.think, Some(false));
+    }
+
+    #[tokio::test]
+    async fn budget_leaves_thinking_unset_for_normal_models() {
+        let ollama = crate::review::testutil::MockOllama::with_response("[]");
+        let budget = resolve_context_budget(&ollama, "m", &Config::default()).await;
+        assert_eq!(budget.think, None);
+    }
+
+    #[tokio::test]
     async fn runs_security_and_bug_agents_for_php() {
         let diffs = vec![make_file_diff("app.php", FileStatus::Modified, "+$x = 1;")];
         let languages = BTreeSet::from([Language::Php]);
@@ -339,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn deduplicates_findings() {
-        let finding_json = r#"[{"file_path":"a.php","line_number":1,"severity":"error","category":"security","title":"Same Issue","description":"Desc","suggestion":"Fix"}]"#;
+        let finding_json = r#"[{"file_path":"a.php","line_number":1,"severity":"error","category":"security","title":"Same Issue","description":"Desc","suggestion":"Fix","evidence":"bad();"}]"#;
         let diffs = vec![make_file_diff("a.php", FileStatus::Modified, "+bad();")];
         let languages = BTreeSet::from([Language::Php]);
         let config = Config::default();

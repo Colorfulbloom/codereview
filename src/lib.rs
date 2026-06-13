@@ -6,6 +6,7 @@ pub mod db;
 pub mod git;
 pub mod init;
 pub mod language;
+pub mod logging;
 pub mod onboarding;
 pub mod output;
 pub mod platform;

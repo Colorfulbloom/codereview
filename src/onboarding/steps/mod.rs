@@ -162,6 +162,40 @@ pub trait OllamaClient: Send + Sync {
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<String, OnboardingError>;
+
+    /// The model's maximum context length in tokens, if it can be determined.
+    /// Default returns `None` (unknown); the review pipeline then falls back to
+    /// a configured budget.
+    async fn model_context_limit(&self, _model: &str) -> Option<usize> {
+        None
+    }
+
+    /// Whether the model supports thinking/reasoning mode. Review calls
+    /// disable thinking on such models (they want JSON, not deliberation, and
+    /// reasoning tokens can run past the request timeout on slow hardware).
+    /// Ollama rejects the `think` option for models without the capability,
+    /// so callers must only send it when this returns true.
+    async fn model_supports_thinking(&self, _model: &str) -> bool {
+        false
+    }
+
+    /// Like [`chat`](Self::chat), but request a specific context window
+    /// (`num_ctx`) so the model actually ingests the whole prompt instead of
+    /// silently truncating it to Ollama's small default, and optionally set
+    /// the `think` option (`Some(false)` disables reasoning on thinking-capable
+    /// models; `None` omits the field). The default implementation ignores
+    /// both hints and delegates to `chat`, which keeps test mocks working
+    /// unchanged.
+    async fn chat_sized(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        _num_ctx: usize,
+        _think: Option<bool>,
+    ) -> Result<String, OnboardingError> {
+        self.chat(model, system_prompt, user_prompt).await
+    }
 }
 
 #[async_trait]

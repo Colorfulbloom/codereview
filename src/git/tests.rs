@@ -217,6 +217,26 @@ mod integration {
         (dir, repo)
     }
 
+    /// Write `name` with `content` and commit it on the current branch.
+    fn commit_file(repo: &git2::Repository, dir: &Path, name: &str, content: &str, msg: &str) {
+        fs::write(dir.join(name), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(name)).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = repo.signature().unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[&parent])
+            .unwrap();
+    }
+
+    fn checkout(repo: &git2::Repository, refname: &str) {
+        repo.set_head(refname).unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .unwrap();
+    }
+
     use super::super::LiveGitAgent;
 
     #[test]
@@ -419,6 +439,68 @@ mod integration {
     }
 
     #[test]
+    fn live_agent_diff_branch_uses_merge_base() {
+        let (dir, repo) = setup_test_repo();
+        let default_branch = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // Branch off and commit a feature file
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature", &head, false).unwrap();
+        checkout(&repo, "refs/heads/feature");
+        commit_file(&repo, dir.path(), "feature.rs", "pub fn f() {}\n", "Add feature");
+
+        // Advance the default branch past the divergence point
+        checkout(&repo, &format!("refs/heads/{default_branch}"));
+        commit_file(&repo, dir.path(), "other.rs", "pub fn o() {}\n", "Other work");
+
+        // Back on the feature branch, diff vs the now-ahead default branch
+        checkout(&repo, "refs/heads/feature");
+        let agent = LiveGitAgent::new(dir.path().to_path_buf());
+        let diffs = agent.diff_branch(&default_branch).unwrap();
+
+        // Only the feature's own commit. With a plain tree-to-tree diff,
+        // other.rs (the base's post-divergence work) would appear as a removal.
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].path, "feature.rs");
+    }
+
+    #[test]
+    fn live_agent_diff_branch_accepts_any_ref() {
+        let (dir, repo) = setup_test_repo();
+        commit_file(&repo, dir.path(), "second.rs", "pub fn s() {}\n", "Second commit");
+
+        let agent = LiveGitAgent::new(dir.path().to_path_buf());
+
+        // HEAD-relative ref
+        let diffs = agent.diff_branch("HEAD~1").unwrap();
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].path, "second.rs");
+
+        // Raw commit SHA
+        let sha = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .parent(0)
+            .unwrap()
+            .id()
+            .to_string();
+        let diffs = agent.diff_branch(&sha).unwrap();
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].path, "second.rs");
+    }
+
+    #[test]
+    fn live_agent_ref_exists() {
+        let (dir, _repo) = setup_test_repo();
+        let agent = LiveGitAgent::new(dir.path().to_path_buf());
+
+        assert!(agent.ref_exists("HEAD"));
+        assert!(!agent.ref_exists("no-such-ref"));
+    }
+
+    #[test]
     fn live_agent_stage_files() {
         let (dir, _repo) = setup_test_repo();
 
@@ -577,6 +659,67 @@ mod integration {
                 .iter()
                 .any(|h| h.content.contains("+# Buggy"))
         );
+    }
+
+    #[test]
+    fn diff_all_includes_untracked_files() {
+        let (dir, _repo) = setup_test_repo();
+
+        // Brand-new file, never `git add`ed
+        fs::write(dir.path().join("new.php"), "<?php echo 42;\n").unwrap();
+
+        let agent = LiveGitAgent::new(dir.path().to_path_buf());
+        let diffs = agent.diff_all().unwrap();
+
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].path, "new.php");
+        assert_eq!(diffs[0].status, FileStatus::Added);
+        // The patch body must be present, not just the delta, or there's
+        // nothing for the reviewer to read.
+        assert!(
+            diffs[0]
+                .hunks
+                .iter()
+                .any(|h| h.content.contains("+<?php echo 42;"))
+        );
+    }
+
+    #[test]
+    fn diff_all_includes_untracked_files_in_new_dirs() {
+        let (dir, _repo) = setup_test_repo();
+
+        // New file nested inside a brand-new, untracked directory
+        let nested = dir.path().join("themes/custom/foo");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("style.css"), "body { color: red; }\n").unwrap();
+
+        let agent = LiveGitAgent::new(dir.path().to_path_buf());
+        let diffs = agent.diff_all().unwrap();
+
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].path, "themes/custom/foo/style.css");
+    }
+
+    #[test]
+    fn diff_all_skips_gitignored_untracked_files() {
+        let (dir, repo) = setup_test_repo();
+
+        // Ignore *.log, then create one
+        fs::write(dir.path().join(".gitignore"), "*.log\n").unwrap();
+        fs::write(dir.path().join("debug.log"), "noise\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new(".gitignore")).unwrap();
+            index.write().unwrap();
+        }
+
+        let agent = LiveGitAgent::new(dir.path().to_path_buf());
+        let diffs = agent.diff_all().unwrap();
+
+        let paths: Vec<&str> = diffs.iter().map(|d| d.path.as_str()).collect();
+        assert!(paths.contains(&".gitignore"));
+        // The ignored file must not be reviewed.
+        assert!(!paths.contains(&"debug.log"));
     }
 
     #[test]

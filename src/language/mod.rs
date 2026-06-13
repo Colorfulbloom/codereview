@@ -88,6 +88,26 @@ pub fn is_drupal_project(file_paths: &[&str]) -> bool {
     })
 }
 
+/// Check filesystem markers at a project root for a Drupal installation.
+///
+/// Complements [`is_drupal_project`], which only sees the reviewed file list:
+/// a path review of a single `.php` file carries no Drupal markers of its
+/// own, but the project root does (`core/lib/Drupal.php` under a common
+/// docroot, or a `composer.json` depending on `drupal/core`).
+pub fn is_drupal_project_root(root: &Path) -> bool {
+    const DOCROOTS: &[&str] = &["", "web", "docroot", "html"];
+    if DOCROOTS
+        .iter()
+        .any(|d| root.join(d).join("core/lib/Drupal.php").exists())
+    {
+        return true;
+    }
+
+    std::fs::read_to_string(root.join("composer.json"))
+        .map(|c| c.contains("drupal/core"))
+        .unwrap_or(false)
+}
+
 /// Detect all languages present in a set of file paths.
 ///
 /// If Drupal markers are found, `.php` files are promoted to `Drupal`
@@ -113,6 +133,47 @@ pub fn detect_languages(file_paths: &[&str]) -> BTreeSet<Language> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- is_drupal_project_root --
+
+    #[test]
+    fn drupal_root_detected_at_each_docroot() {
+        for docroot in ["", "web", "docroot", "html"] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let core_lib = dir.path().join(docroot).join("core/lib");
+            std::fs::create_dir_all(&core_lib).unwrap();
+            std::fs::write(core_lib.join("Drupal.php"), "<?php\n").unwrap();
+
+            assert!(
+                is_drupal_project_root(dir.path()),
+                "docroot '{docroot}' not detected"
+            );
+        }
+    }
+
+    #[test]
+    fn drupal_root_detected_via_composer_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("composer.json"),
+            r#"{"require": {"drupal/core-recommended": "^11.0"}}"#,
+        )
+        .unwrap();
+
+        assert!(is_drupal_project_root(dir.path()));
+    }
+
+    #[test]
+    fn non_drupal_root_not_detected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("composer.json"),
+            r#"{"require": {"laravel/framework": "^11.0"}}"#,
+        )
+        .unwrap();
+
+        assert!(!is_drupal_project_root(dir.path()));
+    }
 
     // -- detect_language --
 

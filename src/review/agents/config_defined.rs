@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use super::{AgentError, JSON_SCHEMA, ReviewAgent, execute_agent, format_rules};
+use super::{AgentError, ContextBudget, JSON_SCHEMA, ReviewAgent, execute_agent, format_rules};
 use crate::config::AgentConfig;
 use crate::git::FileDiff;
 use crate::language::rules::Rule;
@@ -70,12 +70,13 @@ impl ReviewAgent for ConfigDefinedAgent {
         diffs: &[FileDiff],
         model: &str,
         ollama: &dyn OllamaClient,
+        budget: ContextBudget,
     ) -> Result<Vec<ReviewFinding>, AgentError> {
         // Config-defined agents always run (even with no rules — the prompt itself is the instruction)
         if diffs.is_empty() {
             return Ok(vec![]);
         }
-        execute_agent(self.name(), &self.system_prompt(), diffs, model, ollama).await
+        execute_agent(self.name(), &self.system_prompt(), diffs, model, ollama, budget).await
     }
 }
 
@@ -165,14 +166,14 @@ mod tests {
     async fn returns_findings_from_llm() {
         let agent = ConfigDefinedAgent::from_config(&sample_agent_config());
         let ollama = MockOllama::with_response(
-            r#"[{"file_path":"payment.php","line_number":42,"severity":"error","category":"security","title":"PAN logged","description":"Full card number in log","suggestion":"Mask it"}]"#,
+            r#"[{"file_path":"payment.php","line_number":42,"severity":"error","category":"security","title":"PAN logged","description":"Full card number in log","suggestion":"Mask it","evidence":"error_log($card_number);"}]"#,
         );
         let diffs = vec![make_file_diff(
             "payment.php",
             FileStatus::Modified,
             "+error_log($card_number);",
         )];
-        let findings = agent.review(&diffs, "test", &ollama).await.unwrap();
+        let findings = agent.review(&diffs, "test", &ollama, crate::review::chunking::ContextBudget::unlimited()).await.unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].title, "PAN logged");
     }
@@ -181,7 +182,7 @@ mod tests {
     async fn empty_diffs_returns_empty() {
         let agent = ConfigDefinedAgent::from_config(&sample_agent_config());
         let ollama = MockOllama::with_response("should not be called");
-        let findings = agent.review(&[], "test", &ollama).await.unwrap();
+        let findings = agent.review(&[], "test", &ollama, crate::review::chunking::ContextBudget::unlimited()).await.unwrap();
         assert!(findings.is_empty());
         assert_eq!(ollama.call_count(), 0);
     }
@@ -191,7 +192,7 @@ mod tests {
         let agent = ConfigDefinedAgent::from_config(&sample_agent_config());
         let ollama = MockOllama::with_response("[]");
         let diffs = vec![make_file_diff("app.php", FileStatus::Modified, "+echo 1;")];
-        agent.review(&diffs, "test", &ollama).await.unwrap();
+        agent.review(&diffs, "test", &ollama, crate::review::chunking::ContextBudget::unlimited()).await.unwrap();
 
         // Verify the system prompt sent to the LLM contains JSON schema
         assert!(ollama.system_prompt_contains("file_path"));

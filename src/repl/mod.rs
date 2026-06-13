@@ -17,7 +17,9 @@ use crate::onboarding;
 use crate::onboarding::steps::OllamaClient;
 use crate::output::terminal::TerminalFormatter;
 use crate::review::engine;
+use crate::review::source::ReviewTarget;
 use crate::session::{OutputFormatChoice, SessionState};
+use std::path::Path;
 
 /// Dependencies available to the REPL session.
 pub struct SessionContext<'a> {
@@ -112,7 +114,22 @@ pub fn start(ctx: SessionContext) -> Result<()> {
                         println!("Goodbye.");
                         break;
                     }
-                    "/review" => handle_review(&ctx),
+                    cmd if cmd == "/review" || cmd.starts_with("/review ") => {
+                        let arg = cmd["/review".len()..].trim();
+                        if arg.is_empty() {
+                            handle_review(&ctx, ReviewTarget::WorkingTree);
+                        } else {
+                            match resolve_review_target(arg, ctx.git) {
+                                Ok((target, note)) => {
+                                    if let Some(note) = note {
+                                        println!("{}", console::Style::new().dim().apply_to(note));
+                                    }
+                                    handle_review(&ctx, target);
+                                }
+                                Err(msg) => println!("{msg}"),
+                            }
+                        }
+                    }
                     "/debug" => handle_debug(&ctx),
                     "/diff" => handle_diff(&ctx),
                     "/status" => handle_status(&ctx),
@@ -154,7 +171,49 @@ pub fn start(ctx: SessionContext) -> Result<()> {
     Ok(())
 }
 
-fn handle_review(ctx: &SessionContext) {
+/// Decide what `/review <arg>` should review.
+///
+/// `--diff <ref>` is explicit. A bare argument is resolved filesystem-first:
+/// an existing file or directory wins over a same-named git ref (with a tip
+/// shown), otherwise the argument must resolve as a ref. Returns the target
+/// plus an optional note to show the user about how the argument was read.
+fn resolve_review_target<'a>(
+    arg: &'a str,
+    git: &dyn GitAgent,
+) -> Result<(ReviewTarget<'a>, Option<String>), String> {
+    if let Some(rest) = arg.strip_prefix("--diff") {
+        let base = rest.trim();
+        if base.is_empty() {
+            return Err("Usage: /review --diff <branch|tag|commit>".to_string());
+        }
+        if !git.ref_exists(base) {
+            return Err(format!(
+                "'{base}' is not a known git ref. Try a branch (main, origin/main), a tag, or a commit hash."
+            ));
+        }
+        return Ok((ReviewTarget::Ref(base), None));
+    }
+
+    let as_path = Path::new(arg);
+    match (as_path.exists(), git.ref_exists(arg)) {
+        (true, true) => Ok((
+            ReviewTarget::Path(as_path),
+            Some(format!(
+                "'{arg}' is both a path and a git ref — reviewing the path. Use /review --diff {arg} to diff against the ref."
+            )),
+        )),
+        (true, false) => Ok((ReviewTarget::Path(as_path), None)),
+        (false, true) => Ok((
+            ReviewTarget::Ref(arg),
+            Some(format!("Interpreting '{arg}' as a git ref — reviewing commits vs {arg}.")),
+        )),
+        (false, false) => Err(format!(
+            "'{arg}' is neither a file/directory nor a git ref.\n  Review existing code:      /review <path>\n  Review commits vs a base:  /review --diff <ref>"
+        )),
+    }
+}
+
+fn handle_review(ctx: &SessionContext, target: ReviewTarget) {
     use console::Style;
     use indicatif::{ProgressBar, ProgressStyle};
 
@@ -168,39 +227,97 @@ fn handle_review(ctx: &SessionContext) {
         return;
     }
 
-    // Show what we're about to review (use diff_all for accurate count)
-    let all_diffs = ctx.git.diff_all().unwrap_or_default();
-    // Apply exclusions
-    let all_diffs: Vec<_> = all_diffs
-        .into_iter()
-        .filter(|d| !ctx.config.is_excluded(&d.path))
-        .collect();
-    let total_changes = all_diffs.len();
-
-    if total_changes > 0 {
-        let all_paths: Vec<&str> = all_diffs.iter().map(|d| d.path.as_str()).collect();
-        let languages = crate::language::detect_languages(&all_paths);
-
-        if languages.is_empty() {
-            println!(
-                "No supported languages detected in {} changed file(s).",
-                total_changes
-            );
-            println!("Supported: PHP, Drupal, JavaScript, CSS, HTML, YAML.");
-            println!(
-                "{}",
-                dim.apply_to("Tip: Use custom agents in .codereview.yaml for other languages.")
-            );
+    // Show what we're about to review. Uses the same collector the engine uses,
+    // so the file list and languages shown here match what gets reviewed.
+    let all_diffs = match engine::collect_review_diffs(ctx.git, &target, &ctx.config) {
+        Ok(d) => d,
+        Err(engine::ReviewError::NotARepo) => {
+            println!("Not inside a git repository. Navigate to a repo, or use /review <path>.");
             return;
         }
+        Err(engine::ReviewError::Source(e)) => {
+            println!("{e}");
+            return;
+        }
+        Err(e) => {
+            eprintln!("Review failed: {e}");
+            return;
+        }
+    };
+    let total_changes = all_diffs.len();
 
-        let lang_list: Vec<String> = languages.iter().map(|l| l.to_string()).collect();
+    if total_changes == 0 {
+        match target {
+            ReviewTarget::Path(p) => {
+                println!("No supported files found under {}.", p.display());
+                println!("Supported: PHP, Drupal, JavaScript, CSS, HTML, YAML.");
+            }
+            ReviewTarget::Ref(base) => {
+                println!("No committed changes vs {base}.");
+                println!(
+                    "{}",
+                    dim.apply_to("Uncommitted work is reviewed with plain /review.")
+                );
+            }
+            ReviewTarget::WorkingTree => {
+                println!("No changes to review.");
+                println!(
+                    "{}",
+                    dim.apply_to(
+                        "The tool reviews uncommitted changes. Already committed? Use /review --diff <base-branch>. Existing code: /review <path>."
+                    )
+                );
+            }
+        }
+        return;
+    }
+
+    let languages = engine::detect_review_languages(ctx.git, &target, &all_diffs);
+
+    if languages.is_empty() {
+        println!(
+            "No supported languages detected in {} changed file(s).",
+            total_changes
+        );
+        println!("Supported: PHP, Drupal, JavaScript, CSS, HTML, YAML.");
+        println!(
+            "{}",
+            dim.apply_to("Tip: Use custom agents in .codereview.yaml for other languages.")
+        );
+        return;
+    }
+
+    let lang_list: Vec<String> = languages.iter().map(|l| l.to_string()).collect();
+    let header = match target {
+        ReviewTarget::WorkingTree => {
+            format!("Reviewing {} changed file(s): {}", total_changes, lang_list.join(", "))
+        }
+        ReviewTarget::Ref(base) => format!(
+            "Reviewing {} file(s) changed vs {} (committed changes only): {}",
+            total_changes,
+            base,
+            lang_list.join(", ")
+        ),
+        ReviewTarget::Path(p) => format!(
+            "Reviewing {} file(s) under {}: {}",
+            total_changes,
+            p.display(),
+            lang_list.join(", ")
+        ),
+    };
+    println!("{}", dim.apply_to(header));
+
+    // A pre-PR review covers commits only — warn when uncommitted edits exist
+    // so nobody mistakes this for a review of their latest working tree.
+    if matches!(target, ReviewTarget::Ref(_))
+        && let Ok(uncommitted) = ctx.git.diff_all()
+        && !uncommitted.is_empty()
+    {
         println!(
             "{}",
             dim.apply_to(format!(
-                "Detected {} file(s): {}",
-                total_changes,
-                lang_list.join(", ")
+                "Note: {} uncommitted file(s) not included — commit them or run /review.",
+                uncommitted.len()
             ))
         );
     }
@@ -232,7 +349,8 @@ fn handle_review(ctx: &SessionContext) {
         formatter.as_ref(),
         &ctx.model,
         &ctx.config,
-        None,
+        target,
+        |agent| spinner.set_message(format!("{agent}: reviewing with {}...", ctx.model)),
     ));
 
     spinner.finish_and_clear();
@@ -249,11 +367,12 @@ fn handle_review(ctx: &SessionContext) {
             println!(
                 "{}",
                 dim.apply_to(
-                    "The tool reviews unstaged or staged changes. If you already committed, use: /review with --diff <branch>"
+                    "The tool reviews uncommitted changes. Already committed? Use /review --diff <base-branch>."
                 )
             );
         }
         Err(e) => {
+            crate::logging::error(format!("review failed: {e}"));
             eprintln!("Review failed: {e}");
         }
     }
@@ -738,6 +857,13 @@ fn handle_debug(ctx: &SessionContext) {
             err_style.apply_to("false".to_string())
         }
     );
+    if let Some(log_path) = crate::logging::path() {
+        println!(
+            "{} {}",
+            label_style.apply_to("Log file:"),
+            path_style.apply_to(log_path.display().to_string())
+        );
+    }
     if let Ok(root) = ctx.git.repo_root() {
         println!(
             "{} {}",
@@ -991,4 +1117,73 @@ fn handle_models(ctx: &SessionContext) {
         }
     }
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::testutil::MockGitAgent;
+
+    #[test]
+    fn review_arg_existing_path_wins() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let git = MockGitAgent::in_repo();
+        let arg = dir.path().to_str().unwrap();
+
+        let (target, note) = resolve_review_target(arg, &git).unwrap();
+        assert!(matches!(target, ReviewTarget::Path(_)));
+        assert!(note.is_none());
+    }
+
+    #[test]
+    fn review_arg_ref_when_not_a_path() {
+        let git = MockGitAgent::in_repo(); // knows "main"
+
+        let (target, note) = resolve_review_target("main", &git).unwrap();
+        assert!(matches!(target, ReviewTarget::Ref("main")));
+        assert!(note.unwrap().contains("git ref"));
+    }
+
+    #[test]
+    fn review_arg_path_and_ref_collision_prefers_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let arg = dir.path().to_str().unwrap();
+        let git = MockGitAgent::in_repo().with_ref(arg);
+
+        let (target, note) = resolve_review_target(arg, &git).unwrap();
+        assert!(matches!(target, ReviewTarget::Path(_)));
+        assert!(note.unwrap().contains("--diff"));
+    }
+
+    #[test]
+    fn review_arg_neither_path_nor_ref_errors() {
+        let git = MockGitAgent::in_repo();
+
+        let err = resolve_review_target("no-such-thing", &git).unwrap_err();
+        assert!(err.contains("/review <path>"));
+        assert!(err.contains("--diff"));
+    }
+
+    #[test]
+    fn review_explicit_diff_flag() {
+        let git = MockGitAgent::in_repo();
+
+        let (target, note) = resolve_review_target("--diff main", &git).unwrap();
+        assert!(matches!(target, ReviewTarget::Ref("main")));
+        assert!(note.is_none());
+    }
+
+    #[test]
+    fn review_diff_flag_without_ref_errors() {
+        let git = MockGitAgent::in_repo();
+        let err = resolve_review_target("--diff", &git).unwrap_err();
+        assert!(err.contains("Usage"));
+    }
+
+    #[test]
+    fn review_diff_flag_unknown_ref_errors() {
+        let git = MockGitAgent::in_repo();
+        let err = resolve_review_target("--diff nope", &git).unwrap_err();
+        assert!(err.contains("not a known git ref"));
+    }
 }

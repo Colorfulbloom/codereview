@@ -12,19 +12,31 @@ use crate::onboarding::steps::OllamaClient;
 /// Mock OllamaClient that returns a pre-configured response and captures prompts.
 pub struct MockOllama {
     response: String,
+    /// Whether this mock claims the model supports thinking.
+    thinking_capable: bool,
     /// All system prompts sent to this mock.
     pub captured_system: Mutex<Vec<String>>,
     /// All user prompts sent to this mock.
     pub captured_user: Mutex<Vec<String>>,
+    /// The `think` option of every chat_sized call.
+    pub captured_think: Mutex<Vec<Option<bool>>>,
 }
 
 impl MockOllama {
     pub fn with_response(json: &str) -> Self {
         Self {
             response: json.to_string(),
+            thinking_capable: false,
             captured_system: Mutex::new(Vec::new()),
             captured_user: Mutex::new(Vec::new()),
+            captured_think: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Make the mock report the model as thinking-capable.
+    pub fn with_thinking(mut self) -> Self {
+        self.thinking_capable = true;
+        self
     }
 
     /// Check if any captured system prompt contains a substring.
@@ -74,6 +86,22 @@ impl OllamaClient for MockOllama {
             .push(system.to_string());
         self.captured_user.lock().unwrap().push(user.to_string());
         Ok(self.response.clone())
+    }
+
+    async fn model_supports_thinking(&self, _model: &str) -> bool {
+        self.thinking_capable
+    }
+
+    async fn chat_sized(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        _num_ctx: usize,
+        think: Option<bool>,
+    ) -> Result<String, OnboardingError> {
+        self.captured_think.lock().unwrap().push(think);
+        self.chat(model, system_prompt, user_prompt).await
     }
 }
 

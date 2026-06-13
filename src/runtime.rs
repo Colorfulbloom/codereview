@@ -110,7 +110,45 @@ fn supports_unicode() -> bool {
 
 // -- OllamaClient --
 
-pub struct LiveOllamaClient;
+pub struct LiveOllamaClient {
+    /// Per-request timeout for chat calls, from `llm_timeout_seconds` in
+    /// `.codereview.yaml` (300s when unconfigured).
+    timeout_secs: u64,
+}
+
+impl Default for LiveOllamaClient {
+    fn default() -> Self {
+        Self { timeout_secs: 300 }
+    }
+}
+
+impl LiveOllamaClient {
+    pub fn with_timeout(timeout_secs: u64) -> Self {
+        Self { timeout_secs }
+    }
+
+    fn chat_client(&self) -> Result<reqwest::Client, OnboardingError> {
+        let mut builder = reqwest::Client::builder();
+        if let Some(timeout) = timeout_duration(self.timeout_secs) {
+            builder = builder.timeout(timeout);
+        }
+        builder
+            .build()
+            .map_err(|e| OnboardingError::Other(e.into()))
+    }
+}
+
+/// Per-request timeout from the configured seconds; `0` means no timeout.
+fn timeout_duration(secs: u64) -> Option<std::time::Duration> {
+    (secs > 0).then(|| std::time::Duration::from_secs(secs))
+}
+
+/// User-facing message for a chat request that hit the client timeout.
+fn timeout_message(timeout_secs: u64) -> String {
+    format!(
+        "Request timed out after {timeout_secs}s. Try a smaller model, lower max_context_tokens, or raise llm_timeout_seconds in .codereview.yaml."
+    )
+}
 
 #[async_trait]
 impl OllamaClient for LiveOllamaClient {
@@ -223,58 +261,173 @@ impl OllamaClient for LiveOllamaClient {
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<String, OnboardingError> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .build()
-            .map_err(|e| OnboardingError::OllamaUnavailable(e.to_string()))?;
+        let client = self.chat_client()?;
+        let body = build_chat_body(model, system_prompt, user_prompt, None, None);
 
-        let body = serde_json::json!({
-            "model": model,
-            "messages": [
-                { "role": "system", "content": system_prompt },
-                { "role": "user", "content": user_prompt }
-            ],
-            "stream": false,
-            "options": { "temperature": 0.1 }
-        });
+        post_chat(&client, body, self.timeout_secs).await
+    }
+
+    async fn model_context_limit(&self, model: &str) -> Option<usize> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .ok()?;
 
         let resp = client
-            .post("http://127.0.0.1:11434/api/chat")
-            .json(&body)
+            .post("http://127.0.0.1:11434/api/show")
+            .json(&serde_json::json!({ "model": model }))
             .send()
             .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    OnboardingError::OllamaUnavailable(
-                        "Request timed out. Try a smaller model or increase timeout.".into(),
-                    )
-                } else if e.is_connect() {
-                    OnboardingError::OllamaUnavailable(
-                        "Cannot connect to Ollama. Is it running?".into(),
-                    )
-                } else {
-                    OnboardingError::OllamaUnavailable(e.to_string())
-                }
-            })?;
+            .ok()?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(OnboardingError::OllamaUnavailable(format!(
-                "Ollama API error {status}: {body_text}"
-            )));
+            return None;
         }
 
-        let json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| OnboardingError::OllamaUnavailable(e.to_string()))?;
+        let json: serde_json::Value = resp.json().await.ok()?;
 
-        Ok(json["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string())
+        // The context length lives under model_info as "<arch>.context_length"
+        // (e.g. "llama.context_length", "qwen2.context_length"). Scan for any
+        // key ending in ".context_length" rather than guessing the arch.
+        let info = json.get("model_info")?.as_object()?;
+        info.iter()
+            .find(|(k, _)| k.ends_with(".context_length"))
+            .and_then(|(_, v)| v.as_u64())
+            .map(|n| n as usize)
     }
+
+    async fn model_supports_thinking(&self, model: &str) -> bool {
+        let Ok(client) = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        else {
+            return false;
+        };
+
+        let Ok(resp) = client
+            .post("http://127.0.0.1:11434/api/show")
+            .json(&serde_json::json!({ "model": model }))
+            .send()
+            .await
+        else {
+            return false;
+        };
+
+        if !resp.status().is_success() {
+            return false;
+        }
+
+        match resp.json::<serde_json::Value>().await {
+            Ok(json) => show_response_supports_thinking(&json),
+            Err(_) => false,
+        }
+    }
+
+    async fn chat_sized(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        num_ctx: usize,
+        think: Option<bool>,
+    ) -> Result<String, OnboardingError> {
+        let client = self.chat_client()?;
+        let body = build_chat_body(model, system_prompt, user_prompt, Some(num_ctx), think);
+
+        post_chat(&client, body, self.timeout_secs).await
+    }
+}
+
+/// Build the JSON body for an Ollama /api/chat request.
+///
+/// `num_ctx` lands under `options`; `think` is a top-level field and is only
+/// included when explicitly set — Ollama rejects it for models without the
+/// thinking capability. Review calls (those with a `num_ctx`) also cap
+/// generation at the response headroom so a looping model fails bounded
+/// instead of generating until the context window fills.
+fn build_chat_body(
+    model: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    num_ctx: Option<usize>,
+    think: Option<bool>,
+) -> serde_json::Value {
+    let mut options = serde_json::json!({ "temperature": 0.1 });
+    if let Some(n) = num_ctx {
+        options["num_ctx"] = n.into();
+        options["num_predict"] =
+            code_review::review::chunking::RESPONSE_HEADROOM_TOKENS.into();
+    }
+
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": user_prompt }
+        ],
+        "stream": false,
+        "options": options
+    });
+    if let Some(t) = think {
+        body["think"] = t.into();
+    }
+
+    body
+}
+
+/// Whether an Ollama /api/show response lists the thinking capability.
+fn show_response_supports_thinking(json: &serde_json::Value) -> bool {
+    json.get("capabilities")
+        .and_then(|c| c.as_array())
+        .is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some("thinking")))
+}
+
+/// Shared POST to Ollama's /api/chat plus response parsing.
+///
+/// Connectivity failures map to `OllamaUnavailable`; everything else (timeout,
+/// HTTP error, bad response body) is an `LlmRequest` failure — the server was
+/// reachable, the request just didn't succeed.
+async fn post_chat(
+    client: &reqwest::Client,
+    body: serde_json::Value,
+    timeout_secs: u64,
+) -> Result<String, OnboardingError> {
+    let resp = client
+        .post("http://127.0.0.1:11434/api/chat")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            let err = if e.is_timeout() {
+                OnboardingError::LlmRequest(timeout_message(timeout_secs))
+            } else if e.is_connect() {
+                OnboardingError::OllamaUnavailable(
+                    "Cannot connect to Ollama. Is it running?".into(),
+                )
+            } else {
+                OnboardingError::LlmRequest(e.to_string())
+            };
+            code_review::logging::error(format!("LLM request failed: {err}"));
+            err
+        })?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        return Err(OnboardingError::LlmRequest(format!(
+            "Ollama API error {status}: {body_text}"
+        )));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| OnboardingError::LlmRequest(e.to_string()))?;
+
+    Ok(json["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string())
 }
 
 // -- GitContext --
@@ -308,5 +461,74 @@ impl FileSystem for LiveFileSystem {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(path, content)
+    }
+}
+
+#[cfg(test)]
+mod chat_body_tests {
+    use super::*;
+
+    #[test]
+    fn think_omitted_when_none() {
+        let body = build_chat_body("m", "sys", "user", Some(4096), None);
+        assert!(body.get("think").is_none());
+        assert_eq!(body["options"]["num_ctx"], 4096);
+        assert_eq!(body["options"]["temperature"], 0.1);
+    }
+
+    #[test]
+    fn review_calls_bound_generation_length() {
+        // Without num_predict a looping model generates until the whole
+        // context window fills — observed as a 20-minute hang on real
+        // hardware. Review calls must cap the response.
+        let body = build_chat_body("m", "sys", "user", Some(32768), None);
+        assert_eq!(
+            body["options"]["num_predict"],
+            code_review::review::chunking::RESPONSE_HEADROOM_TOKENS
+        );
+
+        // Plain chats (onboarding, commit messages) stay uncapped.
+        let body = build_chat_body("m", "sys", "user", None, None);
+        assert!(body["options"].get("num_predict").is_none());
+    }
+
+    #[test]
+    fn think_false_included_when_set() {
+        let body = build_chat_body("m", "sys", "user", Some(4096), Some(false));
+        assert_eq!(body["think"], false);
+    }
+
+    #[test]
+    fn num_ctx_omitted_when_none() {
+        let body = build_chat_body("m", "sys", "user", None, None);
+        assert!(body["options"].get("num_ctx").is_none());
+    }
+
+    #[test]
+    fn zero_timeout_means_unlimited() {
+        assert_eq!(timeout_duration(0), None);
+        assert_eq!(
+            timeout_duration(300),
+            Some(std::time::Duration::from_secs(300))
+        );
+    }
+
+    #[test]
+    fn timeout_message_names_duration_and_remedies() {
+        let msg = timeout_message(450);
+        assert!(msg.contains("450s"));
+        assert!(msg.contains("llm_timeout_seconds"));
+        assert!(!msg.contains("not reachable"));
+    }
+
+    #[test]
+    fn show_response_thinking_capability_detected() {
+        let with = serde_json::json!({"capabilities": ["completion", "thinking", "tools"]});
+        let without = serde_json::json!({"capabilities": ["completion", "tools"]});
+        let missing = serde_json::json!({});
+
+        assert!(show_response_supports_thinking(&with));
+        assert!(!show_response_supports_thinking(&without));
+        assert!(!show_response_supports_thinking(&missing));
     }
 }

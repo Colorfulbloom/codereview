@@ -63,7 +63,7 @@ pub enum GitError {
     #[error("Git error: {0}")]
     Git2(#[from] git2::Error),
 
-    #[error("Branch not found: {0}")]
+    #[error("Ref not found (branch, tag, or commit): {0}")]
     BranchNotFound(String),
 
     #[error("{0}")]
@@ -100,8 +100,15 @@ pub trait GitAgent: Send + Sync {
     /// Combines staged + unstaged into one view showing the current state.
     fn diff_all(&self) -> Result<Vec<FileDiff>, GitError>;
 
-    /// Diff of current HEAD vs a base branch (e.g., "main").
+    /// Diff of current HEAD vs a base ref (branch, tag, commit, HEAD~N).
+    ///
+    /// Diffs from the merge base of `base` and HEAD — like a GitHub PR — so
+    /// only this branch's commits are included, never changes the base has
+    /// gained since the branch diverged.
     fn diff_branch(&self, base: &str) -> Result<Vec<FileDiff>, GitError>;
+
+    /// Whether `ref_str` resolves to a commit (branch, tag, SHA, HEAD~N).
+    fn ref_exists(&self, ref_str: &str) -> bool;
 
     /// Stage specific files by path.
     fn stage_files(&self, paths: &[&str]) -> Result<(), GitError>;
@@ -129,6 +136,19 @@ impl LiveGitAgent {
                 GitError::Git2(e)
             }
         })
+    }
+
+    /// Diff options for working-tree comparisons that include brand-new,
+    /// never-`git add`ed files so code can be reviewed before being committed
+    /// or even staged. `.gitignore`d files are still skipped (that needs the
+    /// separate `include_ignored` flag), and `show_untracked_content` ensures
+    /// the patch body — not just the delta — is emitted for new files.
+    fn workdir_diff_opts() -> git2::DiffOptions {
+        let mut opts = git2::DiffOptions::new();
+        opts.include_untracked(true)
+            .recurse_untracked_dirs(true)
+            .show_untracked_content(true);
+        opts
     }
 
     fn delta_to_status(delta: git2::Delta) -> FileStatus {
@@ -262,7 +282,8 @@ impl GitAgent for LiveGitAgent {
 
     fn changed_files_unstaged(&self) -> Result<Vec<ChangedFile>, GitError> {
         let repo = self.open_repo()?;
-        let diff = repo.diff_index_to_workdir(None, None)?;
+        let mut opts = Self::workdir_diff_opts();
+        let diff = repo.diff_index_to_workdir(None, Some(&mut opts))?;
         Ok(Self::extract_changed_files(&diff))
     }
 
@@ -275,7 +296,8 @@ impl GitAgent for LiveGitAgent {
 
     fn diff_unstaged(&self) -> Result<Vec<FileDiff>, GitError> {
         let repo = self.open_repo()?;
-        let diff = repo.diff_index_to_workdir(None, None)?;
+        let mut opts = Self::workdir_diff_opts();
+        let diff = repo.diff_index_to_workdir(None, Some(&mut opts))?;
         Self::extract_file_diffs(&diff)
     }
 
@@ -289,26 +311,50 @@ impl GitAgent for LiveGitAgent {
     fn diff_all(&self) -> Result<Vec<FileDiff>, GitError> {
         let repo = self.open_repo()?;
         let head_tree = Self::head_tree(&repo)?;
-        // diff_tree_to_workdir_with_index: HEAD → working tree (staged + unstaged combined)
-        let diff = repo.diff_tree_to_workdir_with_index(head_tree.as_ref(), None)?;
+        let mut opts = Self::workdir_diff_opts();
+        // diff_tree_to_workdir_with_index: HEAD → working tree (staged + unstaged
+        // + untracked combined) so uncommitted, unstaged, and brand-new files
+        // are all reviewable.
+        let diff =
+            repo.diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut opts))?;
         Self::extract_file_diffs(&diff)
     }
 
     fn diff_branch(&self, base: &str) -> Result<Vec<FileDiff>, GitError> {
         let repo = self.open_repo()?;
 
-        let base_ref = repo
-            .find_branch(base, git2::BranchType::Local)
-            .or_else(|_| repo.find_branch(base, git2::BranchType::Remote))
+        // Accept any committish: branch, remote branch, tag, SHA, HEAD~N.
+        let base_commit = repo
+            .revparse_single(base)
+            .and_then(|obj| obj.peel_to_commit())
             .map_err(|_| GitError::BranchNotFound(base.to_string()))?;
-        let base_commit = base_ref.get().peel_to_commit()?;
-        let base_tree = base_commit.tree()?;
 
-        let head_tree = Self::head_tree(&repo)?
-            .ok_or_else(|| GitError::Other("No commits on current branch".into()))?;
+        let head_commit = repo
+            .head()
+            .and_then(|h| h.peel_to_commit())
+            .map_err(|_| GitError::Other("No commits on current branch".into()))?;
+
+        // Three-dot diff: merge base → HEAD, so the review covers only this
+        // branch's commits, not what `base` gained after the branch diverged.
+        let merge_base = repo
+            .merge_base(base_commit.id(), head_commit.id())
+            .map_err(|_| {
+                GitError::Other(format!("No common history with '{base}' to diff against"))
+            })?;
+        let base_tree = repo.find_commit(merge_base)?.tree()?;
+        let head_tree = head_commit.tree()?;
 
         let diff = repo.diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)?;
         Self::extract_file_diffs(&diff)
+    }
+
+    fn ref_exists(&self, ref_str: &str) -> bool {
+        let Ok(repo) = self.open_repo() else {
+            return false;
+        };
+        repo.revparse_single(ref_str)
+            .and_then(|obj| obj.peel_to_commit())
+            .is_ok()
     }
 
     fn stage_files(&self, paths: &[&str]) -> Result<(), GitError> {

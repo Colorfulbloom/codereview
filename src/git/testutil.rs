@@ -16,6 +16,7 @@ pub struct MockGitAgent {
     pub unstaged_diffs: Vec<FileDiff>,
     pub staged_diffs: Vec<FileDiff>,
     pub branch_diffs: Vec<FileDiff>,
+    pub known_refs: Vec<String>,
 }
 
 impl MockGitAgent {
@@ -29,6 +30,7 @@ impl MockGitAgent {
             unstaged_diffs: vec![],
             staged_diffs: vec![],
             branch_diffs: vec![],
+            known_refs: vec!["main".to_string()],
         }
     }
 
@@ -42,6 +44,7 @@ impl MockGitAgent {
             unstaged_diffs: vec![],
             staged_diffs: vec![],
             branch_diffs: vec![],
+            known_refs: vec![],
         }
     }
 
@@ -59,6 +62,11 @@ impl MockGitAgent {
 
     pub fn with_branch_diffs(mut self, diffs: Vec<FileDiff>) -> Self {
         self.branch_diffs = diffs;
+        self
+    }
+
+    pub fn with_ref(mut self, name: &str) -> Self {
+        self.known_refs.push(name.to_string());
         self
     }
 }
@@ -132,6 +140,10 @@ impl GitAgent for MockGitAgent {
             return Err(GitError::NotARepo);
         }
         Ok(self.branch_diffs.clone())
+    }
+
+    fn ref_exists(&self, ref_str: &str) -> bool {
+        self.is_repo && self.known_refs.iter().any(|r| r == ref_str)
     }
 
     fn stage_files(&self, _paths: &[&str]) -> Result<(), GitError> {

@@ -15,20 +15,9 @@ pub fn build_review_prompts(diffs: &[FileDiff], rules: &[Rule]) -> (String, Stri
 
 fn build_system_prompt(rules: &[Rule]) -> String {
     let mut prompt = String::from(
-        r#"You are an expert code reviewer. Analyze the provided code diff and identify issues.
-
-For each issue found, output a JSON object with these fields:
-- "file_path": string — path to the file
-- "line_number": integer — line number where the issue occurs (in the new file)
-- "severity": "error" | "warning" | "info"
-- "category": "bug" | "security" | "performance" | "style" | "best_practice" | "accessibility"
-- "title": string — short title (under 80 chars)
-- "description": string — detailed explanation of the issue
-- "suggestion": string — how to fix the issue
-
-Output a JSON array of issue objects. If no issues are found, output an empty array: []
-Only output valid JSON, no explanations or markdown."#,
+        "You are an expert code reviewer. Analyze the provided code diff and identify issues.\n\n",
     );
+    prompt.push_str(crate::review::agents::JSON_SCHEMA);
 
     if !rules.is_empty() {
         prompt.push_str("\n\n## Rules to check\n\n");
@@ -61,9 +50,17 @@ pub(crate) fn build_user_prompt(diffs: &[FileDiff]) -> String {
                 hunk.new_start,
                 hunk.new_start + hunk.new_lines
             ));
-            prompt.push_str(&hunk.content);
-            if !hunk.content.ends_with('\n') {
-                prompt.push('\n');
+            // Number every new-file line so the model cites real locations
+            // instead of estimating (deletions get no number — they don't
+            // exist in the new file).
+            let mut n = hunk.new_start.max(1);
+            for line in hunk.content.lines() {
+                if line.starts_with('-') {
+                    prompt.push_str(&format!("    | {line}\n"));
+                } else {
+                    prompt.push_str(&format!("{n:>4}| {line}\n"));
+                    n += 1;
+                }
             }
         }
         prompt.push('\n');
@@ -161,6 +158,25 @@ mod tests {
         let (system, _) = build_review_prompts(&[sample_diff()], &sample_rules());
         assert!(system.contains("[error] php-no-eval"));
         assert!(system.contains("[warning] php-type-declarations"));
+    }
+
+    #[test]
+    fn user_prompt_numbers_new_file_lines() {
+        let (_, user) = build_review_prompts(&[sample_diff()], &[]);
+        // Context line carries the hunk's starting new-file number.
+        assert!(user.contains("  10|  fn main() {"), "user:\n{user}");
+        // Additions advance the counter (10 is the context line above).
+        assert!(user.contains("  11| +    new_code();"));
+        assert!(user.contains("  12| +    more_code();"));
+        // Deletions don't exist in the new file — no number.
+        assert!(user.contains("    | -    old_code();"));
+    }
+
+    #[test]
+    fn system_prompt_requires_evidence() {
+        let (system, _) = build_review_prompts(&[sample_diff()], &[]);
+        assert!(system.contains("\"evidence\""));
+        assert!(system.contains("Accuracy requirements"));
     }
 
     #[test]

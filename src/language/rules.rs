@@ -74,7 +74,7 @@ fn php_rules() -> Vec<Rule> {
             id: "php-sql-injection".into(),
             language: Language::Php,
             severity: Severity::Error,
-            description: "No raw SQL concatenation — use parameterized queries or prepared statements".into(),
+            description: "Flag SQL injection only where SQL strings are assembled by concatenation or interpolation with untrusted input. Query builders (->condition(), insert()->values()), prepared-statement placeholders, and the Config API bind values safely — do not flag them".into(),
             enabled: true,
         },
         Rule {
@@ -88,7 +88,7 @@ fn php_rules() -> Vec<Rule> {
             id: "php-no-hardcoded-secrets".into(),
             language: Language::Php,
             severity: Severity::Error,
-            description: "No hardcoded passwords, API keys, or secrets — use environment variables".into(),
+            description: "No hardcoded credentials: passwords, API keys, tokens, private keys — use environment variables. Public constants (endpoint URLs, OAuth scopes, public IDs) are not secrets".into(),
             enabled: true,
         },
     ]
@@ -107,7 +107,7 @@ fn drupal_rules() -> Vec<Rule> {
             id: "drupal-dependency-injection".into(),
             language: Language::Drupal,
             severity: Severity::Error,
-            description: "Use dependency injection via constructors — never use \\Drupal::service() static calls".into(),
+            description: "In classes (controllers, forms, services), inject dependencies via the create() factory and constructor instead of \\Drupal:: static calls. Applies to classes ONLY: procedural hook functions in .module/.install/.theme files have no constructor — static \\Drupal:: calls there are the documented core pattern, do not flag them".into(),
             enabled: true,
         },
         Rule {
@@ -316,7 +316,7 @@ fn yaml_rules() -> Vec<Rule> {
             id: "yaml-valid-syntax".into(),
             language: Language::Yaml,
             severity: Severity::Error,
-            description: "YAML must have valid syntax — check for incorrect indentation, missing colons, tab characters, and malformed values".into(),
+            description: "YAML must have valid syntax — check for incorrect indentation, missing colons, tab characters, and malformed values. Only flag lines that would fail to parse. Note: sequences (- item) are valid YAML and standard in Drupal files (e.g. arguments in services.yml is correctly a sequence)".into(),
             enabled: true,
         },
         Rule {
@@ -344,7 +344,7 @@ fn yaml_rules() -> Vec<Rule> {
             id: "yaml-no-hardcoded-secrets".into(),
             language: Language::Yaml,
             severity: Severity::Error,
-            description: "No hardcoded passwords, API keys, tokens, or database credentials in YAML config files".into(),
+            description: "No hardcoded credentials in YAML config files: passwords, API keys, tokens, database credentials. Public values (endpoint URLs, library paths, public IDs) are not secrets".into(),
             enabled: true,
         },
     ]
@@ -353,6 +353,56 @@ fn yaml_rules() -> Vec<Rule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Rule descriptions must carry negative guidance — absolutist rule
+    // text caused the bcutd_heatmap false-positive classes (hook-DI, "SQL
+    // injection" in parameterized APIs, YAML sequences, public constants). ──
+
+    #[test]
+    fn drupal_di_rule_exempts_procedural_hooks() {
+        let rules = builtin_rules(Language::Drupal);
+        let di = rules
+            .iter()
+            .find(|r| r.id == "drupal-dependency-injection")
+            .unwrap();
+        assert!(di.description.contains("class"));
+        assert!(di.description.contains("hook"));
+        assert!(di.description.contains(".module"));
+    }
+
+    #[test]
+    fn sql_injection_rules_exclude_parameterized_apis() {
+        for lang in [Language::Php, Language::Drupal] {
+            let rules = builtin_rules(lang);
+            let sql = rules
+                .iter()
+                .find(|r| r.id.ends_with("-sql-injection"))
+                .unwrap();
+            assert!(sql.description.contains("concatenat"), "{}", sql.id);
+            assert!(sql.description.contains("condition("), "{}", sql.id);
+            assert!(sql.description.contains("Config API"), "{}", sql.id);
+        }
+    }
+
+    #[test]
+    fn yaml_syntax_rule_blesses_sequences() {
+        let rules = builtin_rules(Language::Yaml);
+        let r = rules.iter().find(|r| r.id == "yaml-valid-syntax").unwrap();
+        assert!(r.description.contains("sequence"));
+        assert!(r.description.contains("services.yml"));
+    }
+
+    #[test]
+    fn secrets_rules_exclude_public_constants() {
+        for (lang, id) in [
+            (Language::Php, "php-no-hardcoded-secrets"),
+            (Language::Yaml, "yaml-no-hardcoded-secrets"),
+        ] {
+            let rules = builtin_rules(lang);
+            let r = rules.iter().find(|r| r.id == id).unwrap();
+            assert!(r.description.contains("public"), "{id}");
+        }
+    }
 
     #[test]
     fn php_rules_not_empty() {

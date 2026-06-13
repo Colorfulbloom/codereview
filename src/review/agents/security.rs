@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use super::{AgentError, JSON_SCHEMA, ReviewAgent, execute_agent, format_rules};
+use super::{AgentError, ContextBudget, JSON_SCHEMA, ReviewAgent, execute_agent, format_rules};
 use crate::git::FileDiff;
 use crate::language::rules::Rule;
 use crate::onboarding::steps::OllamaClient;
@@ -62,11 +62,12 @@ impl ReviewAgent for SecurityAgent {
         diffs: &[FileDiff],
         model: &str,
         ollama: &dyn OllamaClient,
+        budget: ContextBudget,
     ) -> Result<Vec<ReviewFinding>, AgentError> {
         if self.rules.is_empty() {
             return Ok(vec![]);
         }
-        execute_agent(self.name(), &self.system_prompt(), diffs, model, ollama).await
+        execute_agent(self.name(), &self.system_prompt(), diffs, model, ollama, budget).await
     }
 }
 
@@ -107,14 +108,14 @@ mod tests {
         let all = builtin_rules(Language::Php);
         let agent = SecurityAgent::new(&all);
         let ollama = MockOllama::with_response(
-            r#"[{"file_path":"a.php","line_number":5,"severity":"error","category":"security","title":"SQL injection","description":"Raw query","suggestion":"Use prepared stmt"}]"#,
+            r#"[{"file_path":"a.php","line_number":5,"severity":"error","category":"security","title":"SQL injection","description":"Raw query","suggestion":"Use prepared stmt","evidence":"$db->query($sql);"}]"#,
         );
         let diffs = vec![make_file_diff(
             "a.php",
             FileStatus::Modified,
             "+$db->query($sql);",
         )];
-        let findings = agent.review(&diffs, "test", &ollama).await.unwrap();
+        let findings = agent.review(&diffs, "test", &ollama, crate::review::chunking::ContextBudget::unlimited()).await.unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].category, Category::Security);
     }
@@ -124,7 +125,7 @@ mod tests {
         let agent = SecurityAgent::new(&[]);
         let ollama = MockOllama::with_response("should not be called");
         let diffs = vec![make_file_diff("a.css", FileStatus::Modified, "+body {}")];
-        let findings = agent.review(&diffs, "test", &ollama).await.unwrap();
+        let findings = agent.review(&diffs, "test", &ollama, crate::review::chunking::ContextBudget::unlimited()).await.unwrap();
         assert!(findings.is_empty());
         assert_eq!(ollama.call_count(), 0);
     }
@@ -134,7 +135,7 @@ mod tests {
         let all = builtin_rules(Language::Php);
         let agent = SecurityAgent::new(&all);
         let ollama = MockOllama::with_response("should not be called");
-        let findings = agent.review(&[], "test", &ollama).await.unwrap();
+        let findings = agent.review(&[], "test", &ollama, crate::review::chunking::ContextBudget::unlimited()).await.unwrap();
         assert!(findings.is_empty());
         assert_eq!(ollama.call_count(), 0);
     }

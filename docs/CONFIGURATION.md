@@ -16,6 +16,8 @@ Generate a starter file with `code-review init` or from the REPL with `/init`.
   - [model](#model)
   - [output_format](#output_format)
   - [languages](#languages)
+  - [max_context_tokens](#max_context_tokens)
+  - [llm_timeout_seconds](#llm_timeout_seconds)
 - [Rule Overrides](#rule-overrides)
   - [Disabling a Rule](#disabling-a-rule)
   - [Changing Severity](#changing-severity)
@@ -55,7 +57,7 @@ The tool loads this file automatically when you run `code-review` from within th
 
 If the file does not exist, all built-in rules are used with default settings.
 
-If the file has invalid YAML syntax, the tool silently falls back to defaults. Run `/config` in the REPL to verify your file was loaded.
+If the file has invalid YAML syntax, the tool falls back to defaults and prints a warning at startup naming the parse error (the file never half-applies). Run `/config` in the REPL to verify your file was loaded.
 
 ---
 
@@ -87,6 +89,13 @@ languages:
   - css
   - html
   - yaml
+
+# Maximum context window (in tokens) to request from the model.
+# The tool auto-detects the model's maximum and uses the smaller of the two,
+# then splits large reviews into chunks that fit. Lower this to cap memory use;
+# raise it for fewer, larger requests on a big-RAM machine.
+# Default: 32768
+max_context_tokens: 32768
 
 # Files and directories to exclude from review.
 # Supports exact paths, glob patterns, and directory prefixes.
@@ -205,11 +214,59 @@ languages:
 
 **Default:** Auto-detected from the file extensions in your diff.
 
-**Valid values:** `php`, `drupal`, `javascript`, `css`, `html`
+**Valid values:** `php`, `drupal`, `javascript`, `css`, `html`, `yaml`
 
 When specified, only these languages are reviewed — even if other file types appear in the diff. This is useful for projects where you want to focus reviews on specific languages.
 
 When omitted, the tool auto-detects languages from changed file extensions. If Drupal project markers are found (`.info.yml`, `.module`, `core/lib/Drupal`), PHP files are automatically promoted to Drupal.
+
+---
+
+### max_context_tokens
+
+```yaml
+max_context_tokens: 32768
+```
+
+**Type:** integer (optional)
+
+**Default:** `32768`, capped by the model's detected maximum.
+
+Controls the context window (`num_ctx`) the tool requests from Ollama, which determines how much code can go into each review request. The tool:
+
+1. Auto-detects the model's maximum context length from Ollama.
+2. Requests the smaller of `max_context_tokens` and that maximum, so the model actually reads the whole prompt instead of silently truncating it.
+3. Splits the diff into chunks that fit the budget, reviews each chunk, and merges the findings. A single file larger than the budget is split by line.
+
+**When to change it:**
+
+| Goal | Setting |
+|------|---------|
+| Reduce memory use (smaller KV cache) | Lower it, e.g. `16384` |
+| Fewer, larger requests on a big-RAM machine | Raise it, e.g. `65536` |
+| Default balanced behavior | Omit it (uses `32768`) |
+
+A larger context window fits more code per request but uses more RAM for the model's KV cache. The value is always capped at what the model actually supports, so setting it above the model's maximum has no effect.
+
+---
+
+### llm_timeout_seconds
+
+```yaml
+llm_timeout_seconds: 600
+```
+
+**Type:** integer (optional)
+
+**Default:** `300`
+
+Timeout in seconds for each LLM request. A review makes one request per agent per chunk; if a single request exceeds this limit, the review fails with a timeout error naming this setting.
+
+Raise it on slow hardware (a fanless laptop running a large model) where a single call legitimately needs more time. Before raising it, consider whether a smaller model or a lower `max_context_tokens` solves the problem faster — a review that needs 10-minute calls is painful to iterate with.
+
+**`0` disables the timeout entirely.** Use with care: if Ollama ever stalls (model crash, memory deadlock), the review hangs forever instead of failing with a message. A generous finite value (`900`) is usually the better choice.
+
+Note: on reasoning-capable models (qwen3.5, deepseek-r1, etc.) the tool automatically disables thinking mode for review calls, which is usually the difference between a 5-minute call and a 1-minute one. Models without the capability are unaffected.
 
 ---
 

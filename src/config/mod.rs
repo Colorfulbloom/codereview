@@ -42,6 +42,19 @@ pub struct Config {
     /// Custom review agents with specialized prompts.
     #[serde(default)]
     pub agents: Vec<AgentConfig>,
+
+    /// Maximum context window (in tokens) to request from the model. The tool
+    /// auto-detects the model's architectural maximum and uses the smaller of
+    /// the two. Set this to cap memory use (a large `num_ctx` grows the KV
+    /// cache) or to override detection. Defaults to 32768 when unset.
+    #[serde(default)]
+    pub max_context_tokens: Option<usize>,
+
+    /// Timeout in seconds for each LLM request. Raise this on slow hardware
+    /// where a single review call legitimately needs more time. `0` disables
+    /// the timeout entirely. Defaults to 300 when unset.
+    #[serde(default)]
+    pub llm_timeout_seconds: Option<u64>,
 }
 
 /// Override for a built-in rule.
@@ -151,6 +164,34 @@ impl Config {
         false
     }
 
+    /// Per-request LLM timeout in seconds (configured or the 300s default).
+    pub fn llm_timeout(&self) -> u64 {
+        self.llm_timeout_seconds.unwrap_or(300)
+    }
+
+    /// Load config from a YAML file, falling back to defaults on any error.
+    ///
+    /// A missing file is normal (no warning). An unreadable or invalid file
+    /// returns the warning message the caller should show the user — a broken
+    /// config silently behaving like no config has hidden real bugs before.
+    pub fn load_lenient(path: &Path) -> (Self, Option<String>) {
+        if !path.exists() {
+            return (Self::default(), None);
+        }
+
+        match Self::load_from_file(path) {
+            Ok(config) => (config, None),
+            Err(e) => {
+                let warning = format!(
+                    "Warning: {} could not be loaded ({e}). Using default configuration.",
+                    path.display()
+                );
+                crate::logging::warn(&warning);
+                (Self::default(), Some(warning))
+            }
+        }
+    }
+
     /// Load config from a YAML file path.
     pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path)
@@ -220,6 +261,61 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn llm_timeout_parsed_and_defaulted() {
+        let config = Config::parse("llm_timeout_seconds: 600\n").unwrap();
+        assert_eq!(config.llm_timeout_seconds, Some(600));
+        assert_eq!(config.llm_timeout(), 600);
+
+        let config = Config::parse("").unwrap();
+        assert_eq!(config.llm_timeout_seconds, None);
+        assert_eq!(config.llm_timeout(), 300);
+    }
+
+    #[test]
+    fn legacy_init_languages_string_fails_parse() {
+        // Old `init` builds wrote this uncommented prose line; it must be a
+        // parse error (languages expects a list), never silently half-parse.
+        let yaml = "model: qwen3.5:9b-mlx\nlanguages: auto-detected from file extensions\n";
+        assert!(Config::parse(yaml).is_err());
+    }
+
+    #[test]
+    fn load_lenient_missing_file_is_silent_default() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (config, warning) = Config::load_lenient(&dir.path().join(".codereview.yaml"));
+        assert!(config.model.is_none());
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn load_lenient_valid_file_is_silent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(".codereview.yaml");
+        std::fs::write(&path, "model: test-model\n").unwrap();
+
+        let (config, warning) = Config::load_lenient(&path);
+        assert_eq!(config.model.as_deref(), Some("test-model"));
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn load_lenient_invalid_file_warns_and_defaults() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(".codereview.yaml");
+        std::fs::write(
+            &path,
+            "model: m\nlanguages: auto-detected from file extensions\n",
+        )
+        .unwrap();
+
+        let (config, warning) = Config::load_lenient(&path);
+        // Falls back to defaults — the broken file must not half-apply.
+        assert!(config.model.is_none());
+        let msg = warning.expect("invalid config must produce a warning");
+        assert!(msg.contains(".codereview.yaml"));
+    }
 
     #[test]
     fn empty_config_parses() {

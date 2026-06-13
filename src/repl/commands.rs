@@ -27,7 +27,7 @@ impl CommandRegistry {
                 commands: vec![
                     SlashCommandEntry {
                         name: "/review",
-                        description: "Run a code review on your changes",
+                        description: "Review uncommitted changes; /review <path> for a file/dir as-is; /review --diff <ref> for commits vs a base",
                     },
                     SlashCommandEntry {
                         name: "/diff",

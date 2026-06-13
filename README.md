@@ -11,12 +11,16 @@ Built for development teams that cannot use paid AI platforms (Claude, ChatGPT, 
 - **Specialized sub-agents** -- Security, Bug Detection, Style, Accessibility, and Custom agents each make focused LLM calls for higher accuracy
 - **Local AI** -- uses Ollama with any model that fits your hardware. No data leaves your machine
 - **Language-aware** -- [43 built-in rules](#built-in-rules) for PHP, Drupal, JavaScript, CSS, HTML/Twig, and YAML
+- **Review anything** -- your uncommitted changes, your branch's commits before a PR (`--diff` / `/review --diff <ref>`), or any module, theme, or file as-is (`--path` / `/review <path>`)
+- **Reviews uncommitted *and* untracked code** -- brand-new files don't need to be `git add`ed first
+- **Context-aware chunking** -- auto-detects the model's context window and splits large reviews to fit, so nothing is silently truncated or rejected
 - **Interactive REPL** -- explore diffs, review code, commit, all from one session
 - **CI/CD ready** -- non-interactive mode with JSON, Markdown, and GitHub Actions annotation output
 - **Team configurable** -- shared `.codereview.yaml` for custom rules, custom agents, and rule overrides
 - **Git integration** -- diffs, staging, and AI-generated commit messages
 - **Cross-platform** -- macOS, Windows, Linux
 - **Hardware-aware** -- detects your system RAM and recommends models that fit
+- **Hallucination-resistant** -- every finding must quote the offending line; quotes are verified against the actual source and unverifiable findings are dropped before you see them
 
 ---
 
@@ -43,16 +47,51 @@ Built for development teams that cannot use paid AI platforms (Claude, ChatGPT, 
 ollama pull gemma4
 ```
 
-### Build and Install
+### Build
 
 ```bash
 git clone <repo-url>
 cd code-review
 cargo build --release
+```
 
-# Install system-wide (optional)
+This produces an optimized binary at `target/release/code-review`.
+
+### Install for the current user
+
+```bash
 cargo install --path .
 ```
+
+Installs to `~/.cargo/bin/code-review` (make sure `~/.cargo/bin` is on your `PATH`).
+
+### Install globally for all users
+
+To make `code-review` available to **every** user on the machine, build as your
+normal user and copy the release binary into a system directory:
+
+```bash
+cargo build --release
+sudo install -m 755 target/release/code-review /usr/local/bin/code-review
+```
+
+Verify:
+
+```bash
+which code-review     # -> /usr/local/bin/code-review
+code-review --help
+```
+
+> **Why not `sudo cargo install`?** Running the whole install as root recompiles
+> the project as root and fails, because rustup's toolchain (`cargo`,
+> `RUSTUP_HOME`, `CARGO_HOME`) lives under *your* home directory, not root's.
+> Build as yourself and elevate only the final copy. If you must use
+> `cargo install` directly, preserve your environment:
+>
+> ```bash
+> sudo env "PATH=$PATH" CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
+>   cargo install --path . --root /usr/local
+> ```
 
 ---
 
@@ -88,7 +127,7 @@ code-review init    # interactive wizard for .codereview.yaml
 
 Or from the REPL: `/init`
 
-The wizard detects your hardware, queries Ollama for installed models, and walks you through model selection, language configuration, rule overrides, custom rules, and custom agents.
+The wizard detects your hardware, queries Ollama for installed models, and walks you through model selection, performance settings (per-request LLM timeout), language configuration, rule overrides, custom rules, and custom agents.
 
 ### Your First Review
 
@@ -112,15 +151,16 @@ When you run `/review`, the tool doesn't send one massive prompt to the LLM. Ins
 
 ```
 /review
-  1. Git Agent          -- gets your diff (unstaged, staged, or branch)
+  1. Source Agent        -- gets your diff (unstaged, staged, untracked, branch) or a --path target
   2. Language Agent      -- detects PHP, Drupal, JS, CSS, HTML
   3. SecurityAgent       -- SQL injection, XSS, secrets, eval
   4. BugDetectionAgent   -- error handling, type safety, unused code
   5. LanguageStyleAgent  -- per-language: PSR-12, Drupal DI, no-var, CSS rules
   6. AccessibilityAgent  -- WCAG, alt text, form labels (HTML/CSS only)
-  7. CustomRulesAgent    -- your team's rules from .codereview.yaml
-  8. Config Agents       -- your custom agents from .codereview.yaml
-  9. Output Agent        -- merge, deduplicate, format
+  7. TwigAgent           -- |raw filter, autoescape, undefined vars (.twig files only)
+  8. CustomRulesAgent    -- your team's rules from .codereview.yaml
+  9. Config Agents       -- your custom agents from .codereview.yaml
+  10. Output Agent       -- merge, deduplicate, format
 ```
 
 ### Why Multiple Agents?
@@ -130,10 +170,118 @@ Local LLMs (especially 6-12GB models) produce significantly better results with 
 ### What Gets Skipped
 
 - **AccessibilityAgent** -- only when HTML or CSS files are in the diff
+- **TwigAgent** -- only when `.twig` files are in the diff
 - **CustomRulesAgent** -- only when you have `custom_rules` in `.codereview.yaml`
 - **Custom Agents** -- only when you define `agents` in `.codereview.yaml`
 - **LanguageStyleAgent** -- one per detected language (only languages in your diff)
 - Any agent with zero applicable rules is skipped entirely
+
+### Accuracy: how hallucinated findings are filtered
+
+Local models sometimes report issues with confidence that aren't real. Several
+deterministic checks run *after* the model and before you see the output -- no
+extra LLM calls:
+
+- **Evidence check** -- every finding must quote the offending line, and that
+  quote must actually appear in the reviewed code, or it's dropped.
+- **No-op fix check** -- a "fix" identical to the existing code is discarded.
+- **Existence gate** -- a finding claiming an API "does not exist / will fatal
+  error" is dropped when that method or property is actually defined in your
+  project or framework source (e.g. `vendor/`, Drupal `core/`). This kills the
+  most damaging false positives -- the ones that push you to revert correct
+  code.
+
+Each discarded finding is recorded in the log with the reason (and, for the
+existence gate, the `file:line` proof). Interpretation-level mistakes (e.g.
+"SQL injection" on a parameterized query) are not yet auto-filtered -- see
+[docs/ROADMAP.md](docs/ROADMAP.md) for the planned `--verify` second pass.
+
+---
+
+## What Gets Reviewed
+
+By default a review looks at your **git changes**, and "changes" now includes
+brand-new files you haven't staged yet:
+
+- **Unstaged** edits to tracked files
+- **Staged** changes
+- **Untracked** files (new files not yet `git add`ed) -- gitignored files are still skipped
+
+You can also review **existing code as-is**, independent of git, by pointing the
+tool at a path. This is how you review an already-committed module, a theme, or
+any loose file -- there's no diff required.
+
+```bash
+cd /path/to/your/project
+
+# Review an entire custom module, regardless of git state
+code-review --path docroot/modules/custom/my_module
+
+# A single file
+code-review --path docroot/modules/custom/my_module/src/Controller/MyController.php
+
+# Same review, machine-readable / saved to a file
+code-review --path docroot/modules/custom/my_module --format json
+code-review --path docroot/modules/custom/my_module --format markdown -o review.md
+
+# With a specific model
+code-review --path docroot/modules/custom/my_module -m qwen3-coder:30b
+```
+
+Or from the REPL:
+
+```
+cr> /review                       # your current changes (default)
+cr> /review path/to/module        # review everything under a path, as-is
+```
+
+In path mode, every supported file under the path is reviewed. Unsupported,
+binary, and very large files (>256KB, typically generated/minified assets) are
+skipped.
+
+### Pre-PR Review (commits vs a base branch)
+
+Before pushing a branch for a PR, review **what the PR will actually contain**
+-- your branch's commits, diffed against the base branch:
+
+```bash
+code-review --diff origin/main          # or main, a tag, a SHA, HEAD~3 ...
+```
+
+Or from the REPL:
+
+```
+cr> /review --diff origin/main
+```
+
+Two things to know:
+
+- The diff is taken from the **merge base** (like a GitHub PR), so it covers
+  only *your* commits -- never changes the base branch gained after you
+  branched off.
+- It reviews **committed work only**. If you have uncommitted edits, the tool
+  prints a note reminding you they're not included -- commit them or run a
+  plain `/review`.
+
+If you pass a bare argument (`/review main`), the tool resolves it
+filesystem-first: an existing file or directory is reviewed as a path, anything
+else is tried as a git ref, and a note tells you which interpretation was used.
+
+---
+
+## Context Window & Large Reviews
+
+The tool sizes the model's context window for you so large reviews don't fail or
+get silently truncated:
+
+1. It **auto-detects** the model's maximum context length from Ollama.
+2. It requests an appropriate `num_ctx` (default cap **32768** tokens, capped by
+   the model's max) so the model actually reads the whole prompt.
+3. It **splits** the diff into chunks that fit the budget, reviews each chunk,
+   and merges the findings. Oversized single files are split by line.
+
+Override the budget in `.codereview.yaml` with [`max_context_tokens`](#quick-example)
+-- raise it for fewer, larger requests (more RAM) or lower it to cap memory use.
 
 ---
 
@@ -143,12 +291,14 @@ Launch the REPL with `code-review`. The prompt is `cr>`. Tab completion is suppo
 
 ### Review
 
-| Command   | Description                                                   |
-| --------- | ------------------------------------------------------------- |
-| `/review` | Run a code review on your current changes                     |
-| `/diff`   | View the current diff (colored: green = added, red = removed) |
-| `/rules`  | Show active review rules per detected language                |
-| `/commit` | Stage files and commit with an AI-generated message           |
+| Command                | Description                                                          |
+| ---------------------- | ------------------------------------------------------------------- |
+| `/review`              | Run a code review on your current changes (staged, unstaged, untracked) |
+| `/review <path>`       | Review a file or directory as-is, regardless of git state           |
+| `/review --diff <ref>` | Review your branch's commits vs a base (pre-PR review)              |
+| `/diff`           | View the current diff (colored: green = added, red = removed)       |
+| `/rules`          | Show active review rules per detected language                      |
+| `/commit`         | Stage files and commit with an AI-generated message                 |
 
 ### Configuration
 
@@ -162,11 +312,12 @@ Launch the REPL with `code-review`. The prompt is `cr>`. Tab completion is suppo
 
 ### Session
 
-| Command   | Description                                  |
-| --------- | -------------------------------------------- |
-| `/status` | Show branch, changed files, and active model |
-| `/help`   | Show all available commands                  |
-| `/quit`   | Exit the REPL                                |
+| Command   | Description                                            |
+| --------- | ------------------------------------------------------ |
+| `/status` | Show branch, changed files, and active model           |
+| `/debug`  | Show diagnostic info (git, Ollama, config, languages)  |
+| `/help`   | Show all available commands                            |
+| `/quit`   | Exit the REPL (alias: `/exit`)                         |
 
 ---
 
@@ -175,8 +326,15 @@ Launch the REPL with `code-review`. The prompt is `cr>`. Tab completion is suppo
 Run a review without entering the REPL. Designed for CI/CD and scripting.
 
 ```bash
-# Review changes vs a branch
+# Review your branch's commits vs a base (pre-PR review, merge-base semantics)
 code-review --diff main
+
+# Review uncommitted changes (pre-commit hooks, scripting)
+code-review --uncommitted --format json
+
+# Review an existing module/theme/file as-is (no git diff needed)
+code-review --path docroot/modules/custom/my_module
+code-review --path src/Controller.php --format json
 
 # Output as JSON
 code-review --diff main --format json
@@ -193,12 +351,20 @@ code-review --diff main -m qwen3-coder:30b --format json
 
 ### CLI Flags
 
-| Flag              | Short | Description                                   | Default           |
-| ----------------- | ----- | --------------------------------------------- | ----------------- |
-| `--diff <REF>`    |       | Branch, commit, or ref to diff against        | (enters REPL)     |
-| `--format <FMT>`  |       | `terminal`, `json`, `markdown`, `annotations` | `terminal`        |
-| `--model <NAME>`  | `-m`  | Override the Ollama model                     | (from onboarding) |
-| `--output <PATH>` | `-o`  | Write output to file                          | (stdout)          |
+| Flag              | Short | Description                                          | Default           |
+| ----------------- | ----- | ---------------------------------------------------- | ----------------- |
+| `--diff <REF>`    |       | Base to diff commits against (branch, tag, SHA, `HEAD~N`); uses the merge base, like a PR | (enters REPL)     |
+| `--path <PATH>`   |       | Review a file/directory as-is (takes precedence over `--diff`) | (enters REPL)     |
+| `--uncommitted`   |       | Review uncommitted changes (staged, unstaged, untracked) | (enters REPL)     |
+| `--format <FMT>`  |       | `terminal`, `json`, `markdown`, `annotations`        | `terminal`        |
+| `--model <NAME>`  | `-m`  | Override the Ollama model                            | (from onboarding) |
+| `--output <PATH>` | `-o`  | Write output to file                                 | (stdout)          |
+
+Any of `--diff`, `--path`, or `--uncommitted` triggers non-interactive mode; with none of them, `code-review` opens the REPL.
+
+Progress (what's being reviewed, which agent is running) prints to **stderr**,
+so stdout stays purely the report -- piping to `jq` or writing with `-o` is
+unaffected. On a terminal you get a live spinner; in CI logs, plain lines.
 
 ### Subcommands
 
@@ -256,6 +422,20 @@ Create a `.codereview.yaml` in your project root. Check it into version control 
 ```yaml
 model: qwen3-coder:30b
 
+# Optional: default output format (terminal, json, markdown, annotations)
+output_format: terminal
+
+# Optional: limit the review to specific languages (auto-detected if omitted)
+# languages: [php, drupal, javascript]
+
+# Optional: cap the context window (tokens) requested from the model.
+# Auto-detected from the model and capped at its max; defaults to 32768.
+max_context_tokens: 32768
+
+# Optional: per-LLM-request timeout in seconds (default 300).
+# Raise on slow hardware; 0 = no timeout (review hangs if Ollama stalls).
+llm_timeout_seconds: 300
+
 exclude:
   - .lando.yml
   - .gitignore
@@ -296,6 +476,10 @@ agents:
 | HTML + Twig | 12    | Alt text, semantic elements, WCAG 2.2, Twig undefined vars, raw filter, trans |
 | YAML        | 5     | Valid syntax, indentation, duplicate keys, special values, no secrets         |
 
+> **Note:** Drupal's 10 rules are the 6 PHP rules -- inherited as distinct rules
+> under `drupal-`-prefixed IDs (e.g. `drupal-sql-injection`), so they can be
+> overridden independently of their PHP counterparts -- plus 4 Drupal-specific rules.
+
 See [all 43 rule IDs with severities](docs/CONFIGURATION.md#all-built-in-rule-ids) in the configuration reference.
 
 ### What You Can Configure
@@ -305,6 +489,7 @@ See [all 43 rule IDs with severities](docs/CONFIGURATION.md#all-built-in-rule-id
 - **Add custom rules** -- team-specific checks (the LLM follows your instructions)
 - **Create custom agents** -- specialized reviewers with their own system prompts (PCI-DSS, Laravel, performance, etc.)
 - **Set model and output format** -- per-project defaults
+- **Cap the context window** -- `max_context_tokens` to control memory use and chunk size
 
 Full reference with all 43 rule IDs, custom agent schema, and real-world examples: **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**
 
@@ -392,7 +577,7 @@ cr> /status
 
 ## Language Detection
 
-Languages are auto-detected from file extensions in your diff.
+Languages are auto-detected from file extensions in your diff (or under your `--path` target).
 
 | Language   | Extensions                                               |
 | ---------- | -------------------------------------------------------- |
@@ -401,6 +586,7 @@ Languages are auto-detected from file extensions in your diff.
 | JavaScript | `.js`, `.mjs`, `.cjs`, `.jsx`, `.ts`, `.tsx`             |
 | CSS        | `.css`, `.scss`, `.sass`, `.less`                        |
 | HTML       | `.html`, `.htm`, `.twig`                                 |
+| YAML       | `.yml`, `.yaml` (`.info.yml` is treated as Drupal)       |
 
 **Drupal auto-detection:** If your project contains `.info.yml` files, `.module` files, or `core/lib/Drupal`, all `.php` files are automatically promoted to Drupal and get Drupal-specific rules.
 
@@ -420,19 +606,30 @@ Multiple accounts are supported (useful for submodules across platforms).
 
 ## Data Storage
 
-Onboarding state is stored in SQLite:
+Onboarding state is stored in a **per-project** SQLite database, and a
+persistent log of errors, warnings, and review runs is written alongside it:
 
-| Platform | Path                                                       |
-| -------- | ---------------------------------------------------------- |
-| macOS    | `~/Library/Application Support/code-review/code-review.db` |
-| Linux    | `~/.local/share/code-review/code-review.db`                |
-| Windows  | `%APPDATA%\code-review\code-review.db`                     |
+```
+<project root>/.codereview/state.db
+<project root>/.codereview/logs/code-review.log
+```
+
+The log records every review run (target, model, file count, duration,
+findings), every error and warning the app prints, LLM request failures, and
+each finding discarded by evidence verification — check it when something
+behaved unexpectedly after the terminal has scrolled away. It rotates at 5MB
+(one `.log.1` generation kept). `/debug` in the REPL shows the active path.
+
+The project root is the git repository root (or the current directory when not
+in a git repository). The tool automatically appends `.codereview/` to an
+existing `.gitignore` so the database is never committed -- if your project has
+no `.gitignore`, add the entry yourself.
 
 **Reset:**
 
 ```bash
 code-review onboard --reset     # reset onboarding only
-rm <path-above>                 # full reset (delete database)
+rm -rf .codereview/             # full reset (delete the project's database)
 ```
 
 ---
@@ -448,7 +645,22 @@ ollama serve                    # start it
 
 ### "No changes to review"
 
-The tool reviews unstaged changes first, then falls back to staged. Make sure you have uncommitted changes in a git repository.
+The tool reviews your uncommitted work -- unstaged, staged, and untracked (new)
+files. Make sure you have uncommitted changes in a git repository.
+
+If you **already committed** your work, review the branch's commits against the
+base instead:
+
+```bash
+code-review --diff main               # or, in the REPL: /review --diff main
+```
+
+To review existing code that hasn't changed at all (a module, a theme), use
+path mode -- it doesn't need a diff:
+
+```bash
+code-review --path path/to/module     # or, in the REPL: /review path/to/module
+```
 
 ### "No models available"
 
@@ -459,8 +671,19 @@ ollama pull gemma4
 ### Review takes too long
 
 - Use a smaller model: `code-review -m gemma4`
-- The timeout is 300 seconds per agent call
+- The timeout is 300 seconds per LLM call by default -- raise it with `llm_timeout_seconds` in `.codereview.yaml` if a slow machine legitimately needs longer
+- Reasoning models (qwen3.5, deepseek-r1, etc.) have thinking disabled automatically during reviews, so they answer directly instead of deliberating first
 - Fewer files = faster (each agent processes the diff)
+- Large reviews are split into context-sized chunks, so a big diff means more
+  LLM calls. Lower `max_context_tokens` for less RAM, or narrow the scope with
+  `--path` or `exclude` patterns.
+
+### "input length ... exceeds the model's maximum context length"
+
+A single request was larger than the model can accept. This is handled
+automatically now (the diff is chunked to fit), but if you still hit it, lower
+`max_context_tokens` in `.codereview.yaml` or exclude large generated files
+(minified CSS/JS, lockfiles) via `exclude`.
 
 ### Wrong language detected
 
@@ -471,7 +694,7 @@ Run `/rules` to see detected languages. If PHP shows as Drupal, it's because Dru
 1. Verify `.codereview.yaml` is in the project root
 2. Run `/config` to confirm it loaded
 3. Run `/rules` to see custom rules tagged with `(custom)`
-4. Check YAML syntax -- invalid YAML falls back to defaults silently
+4. Check YAML syntax -- an invalid file falls back to defaults and prints a warning at startup naming the parse error
 
 ---
 

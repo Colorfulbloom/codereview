@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use super::{AgentError, JSON_SCHEMA, ReviewAgent, execute_agent, format_rules};
+use super::{AgentError, ContextBudget, JSON_SCHEMA, ReviewAgent, execute_agent, format_rules};
 use crate::git::FileDiff;
 use crate::language::rules::Rule;
 use crate::onboarding::steps::OllamaClient;
@@ -57,11 +57,12 @@ impl ReviewAgent for BugDetectionAgent {
         diffs: &[FileDiff],
         model: &str,
         ollama: &dyn OllamaClient,
+        budget: ContextBudget,
     ) -> Result<Vec<ReviewFinding>, AgentError> {
         if self.rules.is_empty() {
             return Ok(vec![]);
         }
-        execute_agent(self.name(), &self.system_prompt(), diffs, model, ollama).await
+        execute_agent(self.name(), &self.system_prompt(), diffs, model, ollama, budget).await
     }
 }
 
