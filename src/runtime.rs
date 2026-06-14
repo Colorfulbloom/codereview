@@ -179,6 +179,10 @@ impl OllamaClient for LiveOllamaClient {
 
         std::process::Command::new(cmd)
             .arg("serve")
+            // Flash attention lowers attention memory/compute on long prompts
+            // (and is required for KV-cache quantization). Only takes effect
+            // when this app is the one starting the server.
+            .env("OLLAMA_FLASH_ATTENTION", "1")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -355,8 +359,9 @@ fn build_chat_body(
     let mut options = serde_json::json!({ "temperature": 0.1 });
     if let Some(n) = num_ctx {
         options["num_ctx"] = n.into();
-        options["num_predict"] =
-            code_review::review::chunking::RESPONSE_HEADROOM_TOKENS.into();
+        // Hard generation cap, decoupled from the chunking headroom: bounds a
+        // looping model without truncating a legitimate findings array.
+        options["num_predict"] = REVIEW_NUM_PREDICT.into();
     }
 
     let mut body = serde_json::json!({
@@ -371,9 +376,24 @@ fn build_chat_body(
     if let Some(t) = think {
         body["think"] = t.into();
     }
+    // Keep the model resident between review calls (and runs) so the iterate
+    // loop doesn't pay a model reload each time. Only on review calls.
+    if num_ctx.is_some() {
+        body["keep_alive"] = REVIEW_KEEP_ALIVE.into();
+    }
 
     body
 }
+
+/// Hard cap on generation tokens for a review call. Sized for the prompt's
+/// "report only the 25 most important" limit (~150 tokens/finding); large
+/// enough not to truncate a real findings array, small enough to bound a
+/// runaway/looping model.
+const REVIEW_NUM_PREDICT: usize = 4096;
+
+/// `keep_alive` requested on review calls so the model stays loaded across the
+/// review -> fix -> review loop instead of reloading each invocation.
+const REVIEW_KEEP_ALIVE: &str = "30m";
 
 /// Whether an Ollama /api/show response lists the thinking capability.
 fn show_response_supports_thinking(json: &serde_json::Value) -> bool {
@@ -480,16 +500,26 @@ mod chat_body_tests {
     fn review_calls_bound_generation_length() {
         // Without num_predict a looping model generates until the whole
         // context window fills — observed as a 20-minute hang on real
-        // hardware. Review calls must cap the response.
+        // hardware. Review calls must cap the response at a dedicated
+        // generation budget (decoupled from the chunking headroom).
         let body = build_chat_body("m", "sys", "user", Some(32768), None);
-        assert_eq!(
-            body["options"]["num_predict"],
-            code_review::review::chunking::RESPONSE_HEADROOM_TOKENS
-        );
+        assert_eq!(body["options"]["num_predict"], REVIEW_NUM_PREDICT);
 
         // Plain chats (onboarding, commit messages) stay uncapped.
         let body = build_chat_body("m", "sys", "user", None, None);
         assert!(body["options"].get("num_predict").is_none());
+    }
+
+    #[test]
+    fn review_calls_keep_model_warm() {
+        // Review calls request a long keep_alive so the iterate loop
+        // (review -> fix -> review) doesn't reload the model each run.
+        let body = build_chat_body("m", "sys", "user", Some(32768), None);
+        assert_eq!(body["keep_alive"], REVIEW_KEEP_ALIVE);
+
+        // Plain chats use Ollama's default keep_alive.
+        let body = build_chat_body("m", "sys", "user", None, None);
+        assert!(body.get("keep_alive").is_none());
     }
 
     #[test]

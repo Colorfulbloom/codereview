@@ -119,15 +119,25 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )
         .unwrap_or(0);
 
-    let migrations: &[(i64, &str)] = &[(
-        1,
-        "CREATE TABLE IF NOT EXISTS onboarding (
+    let migrations: &[(i64, &str)] = &[
+        (
+            1,
+            "CREATE TABLE IF NOT EXISTS onboarding (
                 id         INTEGER PRIMARY KEY CHECK (id = 1),
                 state_json TEXT    NOT NULL,
                 version    INTEGER NOT NULL DEFAULT 1,
                 updated_at TEXT    NOT NULL
             );",
-    )];
+        ),
+        (
+            2,
+            // Per-file review-finding cache: skip re-reviewing unchanged files.
+            "CREATE TABLE IF NOT EXISTS file_review_cache (
+                cache_key     TEXT PRIMARY KEY,
+                findings_json TEXT NOT NULL
+            );",
+        ),
+    ];
 
     for (version, sql) in migrations {
         if *version > current_version {
@@ -156,7 +166,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     #[test]
@@ -182,7 +192,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     #[test]
@@ -223,7 +233,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
 
         // .codereview/state.db should exist
         assert!(tmp.path().join(".codereview").join("state.db").exists());
@@ -271,6 +281,6 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 }

@@ -172,6 +172,7 @@ fn run_noninteractive(
         None
     };
 
+    let cache = code_review::review::cache::SqliteCache::new(conn);
     let result = rt.block_on(engine::run_review(
         &git,
         &ollama,
@@ -183,6 +184,7 @@ fn run_noninteractive(
             Some(pb) => pb.set_message(format!("{agent}...")),
             None => eprintln!("  {agent}..."),
         },
+        Some(&cache),
     ));
 
     if let Some(pb) = &spinner {

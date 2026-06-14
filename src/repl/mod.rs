@@ -343,6 +343,7 @@ fn handle_review(ctx: &SessionContext, target: ReviewTarget) {
     spinner.set_message(format!("Reviewing with {}...", ctx.model));
     spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
+    let cache = crate::review::cache::SqliteCache::new(ctx.db);
     let result = ctx.rt.block_on(engine::run_review(
         ctx.git,
         ctx.ollama,
@@ -351,6 +352,7 @@ fn handle_review(ctx: &SessionContext, target: ReviewTarget) {
         &ctx.config,
         target,
         |agent| spinner.set_message(format!("{agent}: reviewing with {}...", ctx.model)),
+        Some(&cache),
     ));
 
     spinner.finish_and_clear();

@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod cache;
 pub mod chunking;
 pub mod claims;
 pub mod engine;

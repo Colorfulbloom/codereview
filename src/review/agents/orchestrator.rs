@@ -7,6 +7,7 @@ use crate::git::FileDiff;
 use crate::language::rules::Rule;
 use crate::language::{self, Language};
 use crate::onboarding::steps::OllamaClient;
+use crate::review::cache::{self, FindingCache};
 use crate::review::chunking::{ContextBudget, DEFAULT_CONTEXT_TOKENS};
 use crate::review::models::ReviewFinding;
 
@@ -34,6 +35,7 @@ pub async fn run_agents(
     model: &str,
     ollama: &dyn OllamaClient,
     on_agent_start: impl Fn(&str),
+    cache: Option<&dyn FindingCache>,
 ) -> Result<(Vec<ReviewFinding>, Vec<AgentRun>), AgentError> {
     // Collect all effective rules across detected languages
     let all_rules: Vec<Rule> = languages
@@ -59,6 +61,7 @@ pub async fn run_agents(
         ollama,
         budget,
         &on_agent_start,
+        cache,
         &mut all_findings,
         &mut runs,
     )
@@ -72,6 +75,7 @@ pub async fn run_agents(
         ollama,
         budget,
         &on_agent_start,
+        cache,
         &mut all_findings,
         &mut runs,
     )
@@ -96,6 +100,7 @@ pub async fn run_agents(
             ollama,
             budget,
             &on_agent_start,
+            cache,
             &mut all_findings,
             &mut runs,
         )
@@ -116,6 +121,7 @@ pub async fn run_agents(
                     ollama,
                     budget,
                     &on_agent_start,
+                    cache,
                     &mut all_findings,
                     &mut runs,
                 )
@@ -136,6 +142,7 @@ pub async fn run_agents(
                 ollama,
                 budget,
                 &on_agent_start,
+                cache,
                 &mut all_findings,
                 &mut runs,
             )
@@ -158,6 +165,7 @@ pub async fn run_agents(
             ollama,
             budget,
             &on_agent_start,
+            cache,
             &mut all_findings,
             &mut runs,
         )
@@ -221,6 +229,7 @@ async fn run_agent_if_applicable(
     ollama: &dyn OllamaClient,
     budget: ContextBudget,
     on_start: &impl Fn(&str),
+    cache: Option<&dyn FindingCache>,
     all_findings: &mut Vec<ReviewFinding>,
     runs: &mut Vec<AgentRun>,
 ) -> Result<(), AgentError> {
@@ -229,7 +238,10 @@ async fn run_agent_if_applicable(
     }
 
     on_start(agent.name());
-    let findings = agent.review(diffs, model, ollama, budget).await?;
+    let findings = match cache {
+        Some(c) => review_with_cache(agent, diffs, model, ollama, budget, c).await?,
+        None => agent.review(diffs, model, ollama, budget).await?,
+    };
     runs.push(AgentRun {
         agent_name: agent.name().to_string(),
         finding_count: findings.len(),
@@ -237,6 +249,53 @@ async fn run_agent_if_applicable(
     });
     all_findings.extend(findings);
     Ok(())
+}
+
+/// Run one agent with the per-file cache: files whose content+rules+model are
+/// unchanged since a prior run are served from the cache; only the rest are
+/// sent to the LLM, and their results (including clean/empty files) are written
+/// back per file. A re-review where nothing changed makes zero LLM calls.
+async fn review_with_cache(
+    agent: &dyn ReviewAgent,
+    diffs: &[FileDiff],
+    model: &str,
+    ollama: &dyn OllamaClient,
+    budget: ContextBudget,
+    cache: &dyn FindingCache,
+) -> Result<Vec<ReviewFinding>, AgentError> {
+    let mut findings: Vec<ReviewFinding> = Vec::new();
+    let mut misses: Vec<FileDiff> = Vec::new();
+    let mut miss_keys: Vec<String> = Vec::new();
+
+    for diff in diffs {
+        let content: Vec<String> = diff.hunks.iter().map(|h| h.content.clone()).collect();
+        let key = cache::cache_key(agent.name(), agent.rules(), model, &cache::diff_content(&content));
+        match cache.get(&key) {
+            Some(cached) => findings.extend(cached),
+            None => {
+                miss_keys.push(key);
+                misses.push(diff.clone());
+            }
+        }
+    }
+
+    if !misses.is_empty() {
+        let fresh = agent.review(&misses, model, ollama, budget).await?;
+        // Write each reviewed file's findings back under its key. A file that
+        // produced no findings is cached as an empty hit, so it stays free on
+        // the next re-review.
+        for (diff, key) in misses.iter().zip(miss_keys.iter()) {
+            let per_file: Vec<ReviewFinding> = fresh
+                .iter()
+                .filter(|f| f.file_path == diff.path)
+                .cloned()
+                .collect();
+            cache.put(key, &per_file);
+        }
+        findings.extend(fresh);
+    }
+
+    Ok(findings)
 }
 
 /// Decide the per-request LLM options for this run: the configured context
@@ -319,7 +378,7 @@ mod tests {
     use super::*;
     use crate::git::FileStatus;
     use crate::git::testutil::make_file_diff;
-    use crate::review::testutil::SequentialMockOllama;
+    use crate::review::testutil::{MockOllama, SequentialMockOllama};
     use std::sync::Mutex;
 
     #[tokio::test]
@@ -337,6 +396,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cache_skips_unchanged_files_on_rereview() {
+        use crate::review::cache::MemoryCache;
+        let diffs = vec![
+            make_file_diff("a.php", FileStatus::Modified, "+$x = 1;"),
+            make_file_diff("b.php", FileStatus::Modified, "+$y = 2;"),
+        ];
+        let languages = BTreeSet::from([Language::Php]);
+        let config = Config::default();
+        let cache = MemoryCache::default();
+
+        // Cold run populates the cache.
+        let ollama = MockOllama::with_response("[]");
+        run_agents(&diffs, &languages, &config, "m", &ollama, |_| {}, Some(&cache))
+            .await
+            .unwrap();
+        assert!(ollama.call_count() > 0, "cold run must hit the LLM");
+
+        // Identical re-review: every file is cached -> zero LLM calls.
+        let ollama2 = MockOllama::with_response("[]");
+        run_agents(&diffs, &languages, &config, "m", &ollama2, |_| {}, Some(&cache))
+            .await
+            .unwrap();
+        assert_eq!(ollama2.call_count(), 0, "unchanged files must not be re-sent");
+
+        // Change one file: only it is re-sent; the unchanged file stays cached.
+        let changed = vec![
+            make_file_diff("a.php", FileStatus::Modified, "+$x = 1;"), // same
+            make_file_diff("b.php", FileStatus::Modified, "+$y = 999;"), // changed
+        ];
+        let ollama3 = MockOllama::with_response("[]");
+        run_agents(&changed, &languages, &config, "m", &ollama3, |_| {}, Some(&cache))
+            .await
+            .unwrap();
+        assert!(ollama3.call_count() > 0, "changed file must be reviewed");
+        let sent = ollama3.captured_user.lock().unwrap().join("\n");
+        assert!(sent.contains("$y = 999"), "changed file sent");
+        assert!(!sent.contains("$x = 1"), "unchanged file NOT re-sent");
+    }
+
+    #[tokio::test]
     async fn runs_security_and_bug_agents_for_php() {
         let diffs = vec![make_file_diff("app.php", FileStatus::Modified, "+$x = 1;")];
         let languages = BTreeSet::from([Language::Php]);
@@ -346,7 +445,7 @@ mod tests {
 
         let (findings, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |name| {
             started.lock().unwrap().push(name.to_string())
-        })
+        }, None)
         .await
         .unwrap();
 
@@ -368,7 +467,7 @@ mod tests {
         let config = Config::default();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {})
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
             .await
             .unwrap();
 
@@ -383,7 +482,7 @@ mod tests {
         let config = Config::default();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {})
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
             .await
             .unwrap();
 
@@ -401,7 +500,7 @@ mod tests {
         let ollama =
             SequentialMockOllama::with_responses(vec![finding_json, finding_json, finding_json]);
 
-        let (findings, _) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {})
+        let (findings, _) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
             .await
             .unwrap();
 
@@ -425,7 +524,7 @@ custom_rules:
         .unwrap();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {})
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
             .await
             .unwrap();
 
@@ -440,7 +539,7 @@ custom_rules:
         let config = Config::default();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {})
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
             .await
             .unwrap();
 
@@ -499,7 +598,7 @@ agents:
         .unwrap();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {})
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
             .await
             .unwrap();
 
@@ -522,7 +621,7 @@ agents:
         .unwrap();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {})
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
             .await
             .unwrap();
 
@@ -549,7 +648,7 @@ agents:
         .unwrap();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {})
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
             .await
             .unwrap();
 
@@ -570,7 +669,7 @@ agents:
         // Security, Bug, Style(HTML), A11y, Twig = 5 agents
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {})
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
             .await
             .unwrap();
 
@@ -592,7 +691,7 @@ agents:
         let config = Config::default();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {})
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
             .await
             .unwrap();
 

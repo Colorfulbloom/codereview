@@ -117,7 +117,11 @@ fn existence_search_roots(git: &dyn GitAgent, target: &ReviewTarget<'_>) -> Vec<
 /// `on_agent` fires as each sub-agent starts — callers surface it as progress
 /// (spinner message, stderr line) so long LLM calls aren't silent.
 ///
+/// `cache`, when present, serves unchanged files from a prior run so a
+/// re-review only sends changed files to the LLM. `None` disables caching.
+///
 /// Returns the formatted output string and the raw ReviewResult.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_review(
     git: &dyn GitAgent,
     ollama: &dyn OllamaClient,
@@ -126,6 +130,7 @@ pub async fn run_review(
     config: &Config,
     target: ReviewTarget<'_>,
     on_agent: impl Fn(&str),
+    cache: Option<&dyn crate::review::cache::FindingCache>,
 ) -> Result<(String, ReviewResult), ReviewError> {
     let start = Instant::now();
 
@@ -152,6 +157,7 @@ pub async fn run_review(
         model,
         ollama,
         on_agent,
+        cache,
     )
     .await
     .map_err(|e| {
@@ -263,7 +269,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let result = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}).await;
+        let result = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None).await;
         assert!(matches!(result, Err(ReviewError::NotARepo)));
     }
 
@@ -273,7 +279,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let result = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}).await;
+        let result = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None).await;
         assert!(matches!(result, Err(ReviewError::NoChanges)));
     }
 
@@ -390,6 +396,7 @@ mod tests {
             &Config::default(),
             ReviewTarget::WorkingTree,
             |_: &str| {},
+            None,
         )
         .await
         .unwrap();
@@ -430,6 +437,7 @@ mod tests {
             &Config::default(),
             ReviewTarget::WorkingTree,
             |_: &str| {},
+            None,
         )
         .await
         .unwrap();
@@ -455,6 +463,7 @@ mod tests {
             &Config::default(),
             ReviewTarget::WorkingTree,
             |agent| started.lock().unwrap().push(agent.to_string()),
+            None,
         )
         .await
         .unwrap();
@@ -487,6 +496,7 @@ mod tests {
             &Config::default(),
             ReviewTarget::WorkingTree,
             |_: &str| {},
+            None,
         )
         .await
         .unwrap();
@@ -513,7 +523,7 @@ mod tests {
         let formatter = TerminalFormatter;
 
         let (output, result) =
-            run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {})
+            run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None)
                 .await
                 .unwrap();
 
@@ -531,7 +541,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("");
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {})
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None)
             .await
             .unwrap();
         assert_eq!(result.total_findings(), 0);
@@ -547,7 +557,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("This is not JSON at all");
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {})
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None)
             .await
             .unwrap();
         assert_eq!(result.total_findings(), 0);
@@ -578,7 +588,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response(response);
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {})
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None)
             .await
             .unwrap();
 
@@ -603,7 +613,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {})
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None)
             .await
             .unwrap();
 
@@ -632,7 +642,7 @@ exclude:
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &config, ReviewTarget::WorkingTree, |_: &str| {})
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &config, ReviewTarget::WorkingTree, |_: &str| {}, None)
             .await
             .unwrap();
 
@@ -662,7 +672,7 @@ exclude:
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let result = run_review(&git, &ollama, &formatter, "test", &config, ReviewTarget::WorkingTree, |_: &str| {}).await;
+        let result = run_review(&git, &ollama, &formatter, "test", &config, ReviewTarget::WorkingTree, |_: &str| {}, None).await;
         assert!(matches!(result, Err(ReviewError::NoChanges)));
     }
 }
