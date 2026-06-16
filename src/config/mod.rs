@@ -73,6 +73,31 @@ pub struct Config {
     /// findings.
     #[serde(default)]
     pub verify_model: Option<String>,
+
+    /// ESLint as a deterministic finding source for the mechanical JS rules.
+    #[serde(default)]
+    pub eslint: LinterConfig,
+
+    /// Stylelint as a deterministic finding source for the CSS rules.
+    #[serde(default)]
+    pub stylelint: LinterConfig,
+}
+
+/// Configuration for an external JS/CSS linter (ESLint or Stylelint) used as a
+/// deterministic finding source. Mirrors [`PhpcsConfig`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LinterConfig {
+    /// `None` (absent) = auto: run the linter when it's installed and a project
+    /// config resolves. `Some(false)` disables it; `Some(true)` forces it on
+    /// (still only runs if installed + configured).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+
+    /// How to invoke the linter. A space-separated command — e.g. `eslint`, or
+    /// a container wrapper like `lando eslint` / `ddev exec stylelint`. When
+    /// unset, the linter is located at `node_modules/.bin/<tool>` or on `PATH`.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 /// Configuration for the phpcs (Drupal coding standards) finding source.
@@ -223,6 +248,26 @@ impl Config {
         self.phpcs.command.as_deref()
     }
 
+    /// Whether ESLint is explicitly disabled (`eslint.enabled: false`).
+    pub fn eslint_disabled(&self) -> bool {
+        self.eslint.enabled == Some(false)
+    }
+
+    /// Explicit ESLint invocation command, if configured (e.g. `lando eslint`).
+    pub fn eslint_command(&self) -> Option<&str> {
+        self.eslint.command.as_deref()
+    }
+
+    /// Whether Stylelint is explicitly disabled (`stylelint.enabled: false`).
+    pub fn stylelint_disabled(&self) -> bool {
+        self.stylelint.enabled == Some(false)
+    }
+
+    /// Explicit Stylelint invocation command, if configured (e.g. `lando stylelint`).
+    pub fn stylelint_command(&self) -> Option<&str> {
+        self.stylelint.command.as_deref()
+    }
+
     /// Whether the Tier-4 verify second pass is enabled.
     pub fn verify_enabled(&self) -> bool {
         self.verify == Some(true)
@@ -342,6 +387,26 @@ mod tests {
         // Container command override.
         let c = Config::parse("phpcs:\n  command: \"ddev exec phpcs\"\n").unwrap();
         assert_eq!(c.phpcs_command(), Some("ddev exec phpcs"));
+    }
+
+    #[test]
+    fn linter_config_defaults_and_overrides() {
+        // Absent → auto (not disabled), no command override, for both linters.
+        let c = Config::parse("").unwrap();
+        assert!(!c.eslint_disabled());
+        assert!(c.eslint_command().is_none());
+        assert!(!c.stylelint_disabled());
+        assert!(c.stylelint_command().is_none());
+
+        // Container command for eslint + explicit disable for stylelint.
+        let c = Config::parse(
+            "eslint:\n  command: \"lando eslint\"\nstylelint:\n  enabled: false\n",
+        )
+        .unwrap();
+        assert_eq!(c.eslint_command(), Some("lando eslint"));
+        assert!(!c.eslint_disabled());
+        assert!(c.stylelint_disabled());
+        assert!(c.stylelint_command().is_none());
     }
 
     #[test]

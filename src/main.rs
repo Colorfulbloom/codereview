@@ -186,6 +186,11 @@ fn run_noninteractive(
         project_root.to_path_buf(),
         &config,
     );
+    use code_review::review::linter::{LinterKind, LinterRunner, LiveLinter};
+    let eslint = LiveLinter::from_config(project_root.to_path_buf(), LinterKind::Eslint, &config);
+    let stylelint =
+        LiveLinter::from_config(project_root.to_path_buf(), LinterKind::Stylelint, &config);
+    let linters: [&dyn LinterRunner; 2] = [&eslint, &stylelint];
     let result = rt.block_on(engine::run_review(
         &git,
         &ollama,
@@ -199,6 +204,7 @@ fn run_noninteractive(
         },
         Some(&cache),
         Some(&phpcs),
+        &linters,
     ));
 
     if let Some(pb) = &spinner {

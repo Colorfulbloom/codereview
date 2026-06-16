@@ -19,6 +19,7 @@ Generate a starter file with `code-review init` or from the REPL with `/init`.
   - [max_context_tokens](#max_context_tokens)
   - [llm_timeout_seconds](#llm_timeout_seconds)
   - [phpcs](#phpcs)
+  - [eslint / stylelint](#eslint--stylelint)
   - [verify](#verify)
 - [Rule Overrides](#rule-overrides)
   - [Disabling a Rule](#disabling-a-rule)
@@ -118,6 +119,16 @@ verify: false
 # invoke phpcs through it.
 phpcs:
   command: "lando phpcs"     # or "ddev exec phpcs"; omit when phpcs is on PATH
+
+# ESLint + Stylelint: the deterministic source of truth for the mechanical
+# JS/CSS rules (var, ===, console.log, !important, ...) — the JS/CSS analog of
+# phpcs. Auto-run when the binary is installed AND a project config resolves
+# (eslint.config.js / .eslintrc* / .stylelintrc* / package.json); if neither,
+# the LLM keeps checking JS/CSS. Point `command` at a container if node is in one.
+eslint:
+  command: "lando eslint"      # or "ddev exec eslint"; omit when on PATH
+stylelint:
+  command: "lando stylelint"   # omit when stylelint is on PATH
 
 # Files and directories to exclude from review.
 # Supports exact paths, glob patterns, and directory prefixes.
@@ -364,7 +375,60 @@ container must mount the project at its working directory (DDEV/Lando do this by
 Make sure `drupal/coder` is installed **inside the container** (run the `composer require`
 above through `ddev composer` / `lando composer` so it lands in the container's vendor/).
 
-Currently PHP/Drupal only — JS, CSS, and YAML are still reviewed by the LLM.
+PHP/Drupal uses phpcs; **JS and CSS use ESLint and Stylelint** the same way (see
+below). YAML is still reviewed by the LLM.
+
+---
+
+### eslint / stylelint
+
+```yaml
+eslint:
+  enabled: true              # omit = auto (run when installed + configured); false disables
+  command: "lando eslint"    # optional — how to invoke it
+stylelint:
+  command: "lando stylelint"
+```
+
+**Type:** block (optional), one per linter
+
+The JS/CSS analog of [phpcs](#phpcs). JS/CSS review was previously 100% LLM, and a
+local model under-reports mechanical issues (it missed 62 `var` declarations and 8
+`innerHTML` uses in one real module). **ESLint** and **Stylelint** are
+deterministic — they cannot miss a `var` or a `!important` — so the mechanical
+JS/CSS rules are sourced from them, and the LLM is left to the semantic findings a
+linter can't make (XSS logic, error handling).
+
+When ESLint is active the LLM stops checking `js-no-var`, `js-strict-equality`,
+`js-no-console-log`, and `js-no-unused-vars`. When Stylelint is active it stops
+checking `css-color-format`, `css-no-duplicate-selectors`, `css-no-important`, and
+`css-max-nesting`. The LLM keeps those rules when the linter isn't available, so
+the category is never left unchecked.
+
+- **`enabled`** — omit for *auto*; `false` disables; `true` forces it (still only
+  runs if it works).
+- **`command`** — how to invoke the linter (space-separated). Unset = locate
+  `node_modules/.bin/<tool>` or `<tool>` on `PATH`. Set this when node runs in a
+  container.
+
+A linter is only treated as active if it **actually executes** (a `--version`
+probe) **AND a project config resolves** (`eslint.config.js` / `.eslintrc*` /
+`.stylelintrc*` / a `package.json` key). Without a config the linter lints
+nothing, so the tool falls back to the LLM rather than dropping the category —
+the same "never leave a category uncovered" rule as phpcs.
+
+### Setting up ESLint / Stylelint
+
+```bash
+# Dev dependencies:
+npm install --save-dev eslint stylelint stylelint-config-standard
+
+# Minimal configs in the project root:
+#   eslint.config.js     (flat config) or .eslintrc.json
+#   .stylelintrc.json  ->  { "extends": "stylelint-config-standard" }
+```
+
+In a container, invoke through it — e.g. `eslint: { command: "ddev exec eslint" }`.
 
 ---
 

@@ -132,6 +132,7 @@ pub async fn run_review(
     on_agent: impl Fn(&str),
     cache: Option<&dyn crate::review::cache::FindingCache>,
     phpcs: Option<&dyn crate::review::phpcs::PhpcsRunner>,
+    linters: &[&dyn crate::review::linter::LinterRunner],
 ) -> Result<(String, ReviewResult), ReviewError> {
     let start = Instant::now();
 
@@ -171,6 +172,36 @@ pub async fn run_review(
         Vec::new()
     };
 
+    // ESLint/Stylelint own the mechanical JS/CSS rules the same way phpcs owns
+    // the Drupal ones — deterministic, run before the agents and surfaced as
+    // progress. Each active linter contributes its findings and supersedes its
+    // own LLM rules; `superseded` is the union the orchestrator drops from the
+    // model so it stops under-reporting what a linter catches every time.
+    let mut superseded: Vec<&str> = Vec::new();
+    if phpcs_active {
+        superseded.extend_from_slice(crate::review::phpcs::SUPERSEDED_BY_PHPCS);
+    }
+    let mut linter_findings: Vec<crate::review::models::ReviewFinding> = Vec::new();
+    for &runner in linters {
+        let kind = runner.kind();
+        let disabled = match kind {
+            crate::review::linter::LinterKind::Eslint => config.eslint_disabled(),
+            crate::review::linter::LinterKind::Stylelint => config.stylelint_disabled(),
+        };
+        if disabled || !runner.available() {
+            continue;
+        }
+        let files = crate::review::linter::review_files(&diffs, kind);
+        if files.is_empty() {
+            continue;
+        }
+        on_agent(kind.label());
+        let f = crate::review::linter::collect_findings(runner, &files);
+        crate::logging::info(format!("{} contributed {} finding(s)", kind.label(), f.len()));
+        superseded.extend_from_slice(kind.superseded());
+        linter_findings.extend(f);
+    }
+
     // Run specialized sub-agents via the orchestrator. `on_agent` is only
     // borrowed (via this wrapper) so it stays usable for the verify pass below.
     let (findings, agent_runs) = agents::orchestrator::run_agents(
@@ -181,7 +212,7 @@ pub async fn run_review(
         ollama,
         |name: &str| on_agent(name),
         cache,
-        phpcs_active,
+        &superseded,
     )
     .await
     .map_err(|e| {
@@ -224,9 +255,11 @@ pub async fn run_review(
         findings
     };
 
-    // Merge phpcs's deterministic findings (collected above, before the agents).
-    // They need no verification gate — phpcs reports only what its sniffs match.
+    // Merge the deterministic linter findings (phpcs + eslint/stylelint),
+    // collected above before the agents. They need no verification gate — a
+    // linter reports only what its rules match.
     findings.extend(phpcs_findings);
+    findings.extend(linter_findings);
 
     let rules_applied: usize = agent_runs.iter().map(|r| r.rules_count).sum();
     let languages_detected: Vec<String> = languages.iter().map(|l| l.to_string()).collect();
@@ -322,7 +355,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let result = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None).await;
+        let result = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None, &[]).await;
         assert!(matches!(result, Err(ReviewError::NotARepo)));
     }
 
@@ -332,7 +365,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let result = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None).await;
+        let result = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None, &[]).await;
         assert!(matches!(result, Err(ReviewError::NoChanges)));
     }
 
@@ -451,6 +484,7 @@ mod tests {
             |_: &str| {},
             None,
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -493,6 +527,7 @@ mod tests {
             |_: &str| {},
             None,
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -520,6 +555,7 @@ mod tests {
             |agent| started.lock().unwrap().push(agent.to_string()),
             None,
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -553,6 +589,7 @@ mod tests {
             |agent| started.lock().unwrap().push(agent.to_string()),
             None,
             Some(&phpcs),
+            &[],
         )
         .await
         .unwrap();
@@ -567,6 +604,52 @@ mod tests {
         assert!(
             result.findings.iter().any(|f| f.description.contains("dependency injection")),
             "phpcs finding missing from result"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_review_reports_linter_progress_and_merges_findings() {
+        // ESLint is wired exactly like phpcs: surfaced as progress, its findings
+        // merged into the result, while the LLM agents return nothing here.
+        let git = MockGitAgent::in_repo().with_unstaged(
+            vec![],
+            vec![make_file_diff("js/app.js", FileStatus::Modified, "+var x = 1;")],
+        );
+        let ollama = MockReviewOllama::with_response("[]");
+        let formatter = TerminalFormatter;
+        let eslint_json = r#"[{"filePath":"js/app.js","messages":[
+          {"ruleId":"no-var","severity":2,"message":"Unexpected var, use let or const instead.","line":1}
+        ]}]"#;
+        let eslint = crate::review::linter::MockLinterRunner {
+            json: Some(eslint_json.into()),
+            kind: crate::review::linter::LinterKind::Eslint,
+        };
+        let linters: [&dyn crate::review::linter::LinterRunner; 1] = [&eslint];
+        let started = Mutex::new(Vec::<String>::new());
+
+        let (_, result) = run_review(
+            &git,
+            &ollama,
+            &formatter,
+            "m",
+            &Config::default(),
+            ReviewTarget::WorkingTree,
+            |agent| started.lock().unwrap().push(agent.to_string()),
+            None,
+            None,
+            &linters,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            started.lock().unwrap().iter().any(|n| n.contains("ESLint")),
+            "eslint progress not reported: {:?}",
+            started.lock().unwrap()
+        );
+        assert!(
+            result.findings.iter().any(|f| f.title.contains("no-var")),
+            "eslint finding missing from result"
         );
     }
 
@@ -652,6 +735,7 @@ mod tests {
             |_: &str| {},
             None,
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -670,6 +754,7 @@ mod tests {
             |_: &str| {},
             None,
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -701,6 +786,7 @@ mod tests {
             |_: &str| {},
             None,
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -732,6 +818,7 @@ mod tests {
             |_: &str| {},
             None,
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -758,7 +845,7 @@ mod tests {
         let formatter = TerminalFormatter;
 
         let (output, result) =
-            run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None)
+            run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None, &[])
                 .await
                 .unwrap();
 
@@ -776,7 +863,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("");
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None)
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None, &[])
             .await
             .unwrap();
         assert_eq!(result.total_findings(), 0);
@@ -792,7 +879,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("This is not JSON at all");
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None)
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None, &[])
             .await
             .unwrap();
         assert_eq!(result.total_findings(), 0);
@@ -823,7 +910,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response(response);
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None)
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None, &[])
             .await
             .unwrap();
 
@@ -848,7 +935,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None)
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None, &[])
             .await
             .unwrap();
 
@@ -877,7 +964,7 @@ exclude:
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &config, ReviewTarget::WorkingTree, |_: &str| {}, None, None)
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &config, ReviewTarget::WorkingTree, |_: &str| {}, None, None, &[])
             .await
             .unwrap();
 
@@ -907,7 +994,7 @@ exclude:
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let result = run_review(&git, &ollama, &formatter, "test", &config, ReviewTarget::WorkingTree, |_: &str| {}, None, None).await;
+        let result = run_review(&git, &ollama, &formatter, "test", &config, ReviewTarget::WorkingTree, |_: &str| {}, None, None, &[]).await;
         assert!(matches!(result, Err(ReviewError::NoChanges)));
     }
 }

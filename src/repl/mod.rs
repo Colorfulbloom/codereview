@@ -378,11 +378,22 @@ fn handle_review(ctx: &SessionContext, target: ReviewTarget, verify: bool) {
     spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
     let cache = crate::review::cache::SqliteCache::new(ctx.db);
-    let phpcs_root = ctx
+    let project_root = ctx
         .git
         .repo_root()
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let phpcs = crate::review::phpcs::LivePhpcsRunner::from_config(phpcs_root, &config);
+    let phpcs = crate::review::phpcs::LivePhpcsRunner::from_config(project_root.clone(), &config);
+    let eslint = crate::review::linter::LiveLinter::from_config(
+        project_root.clone(),
+        crate::review::linter::LinterKind::Eslint,
+        &config,
+    );
+    let stylelint = crate::review::linter::LiveLinter::from_config(
+        project_root,
+        crate::review::linter::LinterKind::Stylelint,
+        &config,
+    );
+    let linters: [&dyn crate::review::linter::LinterRunner; 2] = [&eslint, &stylelint];
     let result = ctx.rt.block_on(engine::run_review(
         ctx.git,
         ctx.ollama,
@@ -393,6 +404,7 @@ fn handle_review(ctx: &SessionContext, target: ReviewTarget, verify: bool) {
         |agent| spinner.set_message(format!("{agent}: reviewing with {}...", ctx.model)),
         Some(&cache),
         Some(&phpcs),
+        &linters,
     ));
 
     spinner.finish_and_clear();

@@ -299,6 +299,14 @@ fn template_header() -> String {
     yaml.push_str("# PHP runs in a container (DDEV/Lando/Docker), point `command` at it:\n");
     yaml.push_str("# phpcs:\n");
     yaml.push_str("#   command: \"lando phpcs\"   # or \"ddev exec phpcs\"\n\n");
+    yaml.push_str("# ESLint + Stylelint as the deterministic source of truth for the mechanical\n");
+    yaml.push_str("# JS/CSS rules (var, ===, !important, etc.) — the JS/CSS analog of phpcs.\n");
+    yaml.push_str("# Auto-run when installed AND a project config resolves. PHP-less? Still works:\n");
+    yaml.push_str("# they run through node. In a container, point `command` at it:\n");
+    yaml.push_str("# eslint:\n");
+    yaml.push_str("#   command: \"lando eslint\"\n");
+    yaml.push_str("# stylelint:\n");
+    yaml.push_str("#   command: \"lando stylelint\"\n\n");
     yaml
 }
 
@@ -597,6 +605,9 @@ mod tests {
         assert!(header.contains("# verify:"));
         // phpcs (deterministic Drupal/PHP source of truth) is hinted (commented).
         assert!(header.contains("# phpcs:"));
+        // ESLint/Stylelint (deterministic JS/CSS source of truth) are hinted.
+        assert!(header.contains("# eslint:"));
+        assert!(header.contains("# stylelint:"));
         // The header alone must be a valid (all-comment) config.
         assert!(crate::config::Config::parse(&header).is_ok());
     }

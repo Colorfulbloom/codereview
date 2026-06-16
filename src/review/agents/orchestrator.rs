@@ -37,7 +37,7 @@ pub async fn run_agents(
     ollama: &dyn OllamaClient,
     on_agent_start: impl Fn(&str),
     cache: Option<&dyn FindingCache>,
-    phpcs_active: bool,
+    superseded: &[&str],
 ) -> Result<(Vec<ReviewFinding>, Vec<AgentRun>), AgentError> {
     // Collect all effective rules across detected languages
     let mut all_rules: Vec<Rule> = languages
@@ -45,10 +45,11 @@ pub async fn run_agents(
         .flat_map(|lang| config.effective_rules(*lang))
         .collect();
 
-    // When phpcs handles the deterministic Drupal/PHP rules, drop them from the
-    // LLM so it stops (mis)checking what a linter does accurately.
-    if phpcs_active {
-        all_rules.retain(|r| !crate::review::phpcs::is_superseded(&r.id));
+    // When a deterministic linter (phpcs/eslint/stylelint) handles a rule, drop
+    // it from the LLM so the model stops (mis)checking what a linter does
+    // accurately. `superseded` is the union of rule IDs across active linters.
+    if !superseded.is_empty() {
+        all_rules.retain(|r| !superseded.contains(&r.id.as_str()));
     }
 
     let mut all_findings: Vec<ReviewFinding> = Vec::new();
@@ -416,14 +417,14 @@ mod tests {
 
         // Cold run populates the cache.
         let ollama = MockOllama::with_response("[]");
-        run_agents(&diffs, &languages, &config, "m", &ollama, |_| {}, Some(&cache), false)
+        run_agents(&diffs, &languages, &config, "m", &ollama, |_| {}, Some(&cache), &[])
             .await
             .unwrap();
         assert!(ollama.call_count() > 0, "cold run must hit the LLM");
 
         // Identical re-review: every file is cached -> zero LLM calls.
         let ollama2 = MockOllama::with_response("[]");
-        run_agents(&diffs, &languages, &config, "m", &ollama2, |_| {}, Some(&cache), false)
+        run_agents(&diffs, &languages, &config, "m", &ollama2, |_| {}, Some(&cache), &[])
             .await
             .unwrap();
         assert_eq!(ollama2.call_count(), 0, "unchanged files must not be re-sent");
@@ -434,7 +435,7 @@ mod tests {
             make_file_diff("b.php", FileStatus::Modified, "+$y = 999;"), // changed
         ];
         let ollama3 = MockOllama::with_response("[]");
-        run_agents(&changed, &languages, &config, "m", &ollama3, |_| {}, Some(&cache), false)
+        run_agents(&changed, &languages, &config, "m", &ollama3, |_| {}, Some(&cache), &[])
             .await
             .unwrap();
         assert!(ollama3.call_count() > 0, "changed file must be reviewed");
@@ -453,7 +454,7 @@ mod tests {
 
         let (findings, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |name| {
             started.lock().unwrap().push(name.to_string())
-        }, None, false)
+        }, None, &[])
         .await
         .unwrap();
 
@@ -475,20 +476,29 @@ mod tests {
 
         let off = SequentialMockOllama::with_responses(vec![]);
         let (_, runs_off) =
-            run_agents(&diffs, &languages, &config, "m", &off, |_| {}, None, false)
+            run_agents(&diffs, &languages, &config, "m", &off, |_| {}, None, &[])
                 .await
                 .unwrap();
         let total_off: usize = runs_off.iter().map(|r| r.rules_count).sum();
 
         let on = SequentialMockOllama::with_responses(vec![]);
-        let (_, runs_on) = run_agents(&diffs, &languages, &config, "m", &on, |_| {}, None, true)
-            .await
-            .unwrap();
+        let (_, runs_on) = run_agents(
+            &diffs,
+            &languages,
+            &config,
+            "m",
+            &on,
+            |_| {},
+            None,
+            crate::review::phpcs::SUPERSEDED_BY_PHPCS,
+        )
+        .await
+        .unwrap();
         let total_on: usize = runs_on.iter().map(|r| r.rules_count).sum();
 
         assert!(
             total_on < total_off,
-            "phpcs_active should remove superseded rules from the LLM: off={total_off} on={total_on}"
+            "superseded rules should be removed from the LLM: off={total_off} on={total_on}"
         );
     }
 
@@ -503,7 +513,7 @@ mod tests {
         let config = Config::default();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, &[])
             .await
             .unwrap();
 
@@ -518,7 +528,7 @@ mod tests {
         let config = Config::default();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, &[])
             .await
             .unwrap();
 
@@ -536,7 +546,7 @@ mod tests {
         let ollama =
             SequentialMockOllama::with_responses(vec![finding_json, finding_json, finding_json]);
 
-        let (findings, _) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
+        let (findings, _) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, &[])
             .await
             .unwrap();
 
@@ -560,7 +570,7 @@ custom_rules:
         .unwrap();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, &[])
             .await
             .unwrap();
 
@@ -575,7 +585,7 @@ custom_rules:
         let config = Config::default();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, &[])
             .await
             .unwrap();
 
@@ -634,7 +644,7 @@ agents:
         .unwrap();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, &[])
             .await
             .unwrap();
 
@@ -657,7 +667,7 @@ agents:
         .unwrap();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, &[])
             .await
             .unwrap();
 
@@ -684,7 +694,7 @@ agents:
         .unwrap();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, &[])
             .await
             .unwrap();
 
@@ -705,7 +715,7 @@ agents:
         // Security, Bug, Style(HTML), A11y, Twig = 5 agents
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, &[])
             .await
             .unwrap();
 
@@ -727,7 +737,7 @@ agents:
         let config = Config::default();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, &[])
             .await
             .unwrap();
 
