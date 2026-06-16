@@ -60,6 +60,19 @@ pub struct Config {
     /// source for the rule-based Drupal/PHP checks.
     #[serde(default)]
     pub phpcs: PhpcsConfig,
+
+    /// Tier 4: opt-in LLM second pass that re-checks each bug/security finding
+    /// against the code and drops interpretation hallucinations (a "missing"
+    /// check that exists on the next line, etc.). Off by default — it adds one
+    /// LLM call per in-scope finding. CLI: `--verify`.
+    #[serde(default)]
+    pub verify: Option<bool>,
+
+    /// Model for the verify pass. Defaults to the review model; set a larger
+    /// model here (e.g. `qwen3.5:27b`) to have it judge a smaller model's
+    /// findings.
+    #[serde(default)]
+    pub verify_model: Option<String>,
 }
 
 /// Configuration for the phpcs (Drupal coding standards) finding source.
@@ -210,6 +223,16 @@ impl Config {
         self.phpcs.command.as_deref()
     }
 
+    /// Whether the Tier-4 verify second pass is enabled.
+    pub fn verify_enabled(&self) -> bool {
+        self.verify == Some(true)
+    }
+
+    /// Distinct model for the verify pass, if one is configured.
+    pub fn verify_model(&self) -> Option<&str> {
+        self.verify_model.as_deref()
+    }
+
     /// Load config from a YAML file, falling back to defaults on any error.
     ///
     /// A missing file is normal (no warning). An unreadable or invalid file
@@ -319,6 +342,23 @@ mod tests {
         // Container command override.
         let c = Config::parse("phpcs:\n  command: \"ddev exec phpcs\"\n").unwrap();
         assert_eq!(c.phpcs_command(), Some("ddev exec phpcs"));
+    }
+
+    #[test]
+    fn verify_config_defaults_and_overrides() {
+        // Absent → the Tier-4 verify pass is off, no override model.
+        let c = Config::parse("").unwrap();
+        assert!(!c.verify_enabled());
+        assert!(c.verify_model().is_none());
+
+        // Enabled + a larger judge model.
+        let c = Config::parse("verify: true\nverify_model: qwen3.5:27b\n").unwrap();
+        assert!(c.verify_enabled());
+        assert_eq!(c.verify_model(), Some("qwen3.5:27b"));
+
+        // Explicit false stays off.
+        let c = Config::parse("verify: false\n").unwrap();
+        assert!(!c.verify_enabled());
     }
 
     #[test]

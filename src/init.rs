@@ -289,6 +289,16 @@ fn template_header() -> String {
     yaml.push_str("# Context window (tokens) per request; auto-detected and capped by the model.\n");
     yaml.push_str("# Lower it on low-RAM machines for smaller, faster requests.\n");
     yaml.push_str("# max_context_tokens: 16384\n\n");
+    yaml.push_str("# Anti-hallucination second pass (opt-in). Re-checks each bug/security\n");
+    yaml.push_str("# finding against its code and drops the ones that misread it. Adds one\n");
+    yaml.push_str("# LLM call per in-scope finding. Also available per-run: --verify.\n");
+    yaml.push_str("# verify: true\n\n");
+    yaml.push_str("# PHP_CodeSniffer (Drupal coding standards) as the deterministic source of\n");
+    yaml.push_str("# truth for rule-based Drupal/PHP checks (dependency injection, coding\n");
+    yaml.push_str("# standards). Auto-runs when phpcs + the Drupal standard are installed. When\n");
+    yaml.push_str("# PHP runs in a container (DDEV/Lando/Docker), point `command` at it:\n");
+    yaml.push_str("# phpcs:\n");
+    yaml.push_str("#   command: \"lando phpcs\"   # or \"ddev exec phpcs\"\n\n");
     yaml
 }
 
@@ -583,6 +593,10 @@ mod tests {
     fn template_header_is_valid_yaml_with_context_hint() {
         let header = template_header();
         assert!(header.contains("# max_context_tokens:"));
+        // The opt-in anti-hallucination second pass is hinted (commented).
+        assert!(header.contains("# verify:"));
+        // phpcs (deterministic Drupal/PHP source of truth) is hinted (commented).
+        assert!(header.contains("# phpcs:"));
         // The header alone must be a valid (all-comment) config.
         assert!(crate::config::Config::parse(&header).is_ok());
     }

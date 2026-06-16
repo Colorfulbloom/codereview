@@ -115,16 +115,17 @@ pub fn start(ctx: SessionContext) -> Result<()> {
                         break;
                     }
                     cmd if cmd == "/review" || cmd.starts_with("/review ") => {
-                        let arg = cmd["/review".len()..].trim();
-                        if arg.is_empty() {
-                            handle_review(&ctx, ReviewTarget::WorkingTree);
+                        let raw = cmd["/review".len()..].trim();
+                        let (verify, rest) = split_verify_flag(raw);
+                        if rest.is_empty() {
+                            handle_review(&ctx, ReviewTarget::WorkingTree, verify);
                         } else {
-                            match resolve_review_target(arg, ctx.git) {
+                            match resolve_review_target(&rest, ctx.git) {
                                 Ok((target, note)) => {
                                     if let Some(note) = note {
                                         println!("{}", console::Style::new().dim().apply_to(note));
                                     }
-                                    handle_review(&ctx, target);
+                                    handle_review(&ctx, target, verify);
                                 }
                                 Err(msg) => println!("{msg}"),
                             }
@@ -171,6 +172,26 @@ pub fn start(ctx: SessionContext) -> Result<()> {
     Ok(())
 }
 
+/// Pull a standalone `--verify` token out of a `/review` argument, returning
+/// whether it was present and the remaining argument (the target spec). Lets
+/// `--verify` appear anywhere: `/review --verify`, `/review src/foo --verify`,
+/// `/review --diff main --verify`.
+fn split_verify_flag(arg: &str) -> (bool, String) {
+    let mut verify = false;
+    let kept: Vec<&str> = arg
+        .split_whitespace()
+        .filter(|tok| {
+            if *tok == "--verify" {
+                verify = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (verify, kept.join(" "))
+}
+
 /// Decide what `/review <arg>` should review.
 ///
 /// `--diff <ref>` is explicit. A bare argument is resolved filesystem-first:
@@ -213,11 +234,18 @@ fn resolve_review_target<'a>(
     }
 }
 
-fn handle_review(ctx: &SessionContext, target: ReviewTarget) {
+fn handle_review(ctx: &SessionContext, target: ReviewTarget, verify: bool) {
     use console::Style;
     use indicatif::{ProgressBar, ProgressStyle};
 
     let dim = Style::new().dim();
+
+    // `/review --verify` forces the Tier-4 second pass on for this run without
+    // mutating the session config. (Config `verify: true` enables it always.)
+    let mut config = ctx.config.clone();
+    if verify {
+        config.verify = Some(true);
+    }
 
     // Pre-flight: check Ollama is reachable
     let ollama_ok = ctx.rt.block_on(ctx.ollama.is_running());
@@ -229,7 +257,7 @@ fn handle_review(ctx: &SessionContext, target: ReviewTarget) {
 
     // Show what we're about to review. Uses the same collector the engine uses,
     // so the file list and languages shown here match what gets reviewed.
-    let all_diffs = match engine::collect_review_diffs(ctx.git, &target, &ctx.config) {
+    let all_diffs = match engine::collect_review_diffs(ctx.git, &target, &config) {
         Ok(d) => d,
         Err(engine::ReviewError::NotARepo) => {
             println!("Not inside a git repository. Navigate to a repo, or use /review <path>.");
@@ -306,6 +334,12 @@ fn handle_review(ctx: &SessionContext, target: ReviewTarget) {
         ),
     };
     println!("{}", dim.apply_to(header));
+    if config.verify_enabled() {
+        println!(
+            "{}",
+            dim.apply_to("Verify: on — bug/security findings get a slower second pass.")
+        );
+    }
 
     // A pre-PR review covers commits only — warn when uncommitted edits exist
     // so nobody mistakes this for a review of their latest working tree.
@@ -348,13 +382,13 @@ fn handle_review(ctx: &SessionContext, target: ReviewTarget) {
         .git
         .repo_root()
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let phpcs = crate::review::phpcs::LivePhpcsRunner::from_config(phpcs_root, &ctx.config);
+    let phpcs = crate::review::phpcs::LivePhpcsRunner::from_config(phpcs_root, &config);
     let result = ctx.rt.block_on(engine::run_review(
         ctx.git,
         ctx.ollama,
         formatter.as_ref(),
         &ctx.model,
-        &ctx.config,
+        &config,
         target,
         |agent| spinner.set_message(format!("{agent}: reviewing with {}...", ctx.model)),
         Some(&cache),
@@ -1131,6 +1165,20 @@ fn handle_models(ctx: &SessionContext) {
 mod tests {
     use super::*;
     use crate::git::testutil::MockGitAgent;
+
+    #[test]
+    fn review_verify_flag_is_extracted() {
+        // `--verify` is pulled out from anywhere in the argument; the rest is
+        // the target spec, unchanged.
+        assert_eq!(split_verify_flag("--verify"), (true, String::new()));
+        assert_eq!(split_verify_flag(""), (false, String::new()));
+        assert_eq!(split_verify_flag("src/foo"), (false, "src/foo".to_string()));
+        assert_eq!(split_verify_flag("--verify src/foo"), (true, "src/foo".to_string()));
+        assert_eq!(
+            split_verify_flag("--diff main --verify"),
+            (true, "--diff main".to_string())
+        );
+    }
 
     #[test]
     fn review_arg_existing_path_wins() {

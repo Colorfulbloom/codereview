@@ -18,6 +18,8 @@ Generate a starter file with `code-review init` or from the REPL with `/init`.
   - [languages](#languages)
   - [max_context_tokens](#max_context_tokens)
   - [llm_timeout_seconds](#llm_timeout_seconds)
+  - [phpcs](#phpcs)
+  - [verify](#verify)
 - [Rule Overrides](#rule-overrides)
   - [Disabling a Rule](#disabling-a-rule)
   - [Changing Severity](#changing-severity)
@@ -96,6 +98,26 @@ languages:
 # raise it for fewer, larger requests on a big-RAM machine.
 # Default: 32768
 max_context_tokens: 32768
+
+# Per-LLM-request timeout in seconds. Default: 300 when unset.
+# Raise it on slow hardware; 0 disables it (a stalled Ollama then hangs).
+llm_timeout_seconds: 300
+
+# Anti-hallucination LLM second pass (opt-in). Re-checks each bug/security
+# finding against its code and drops the ones that misread correct code.
+# Adds one LLM call per in-scope finding, so it's off by default.
+# CLI/REPL: code-review --verify  /  /review --verify
+verify: false
+# verify_model: "qwen3.5:27b"   # optional: a larger model to judge findings
+
+# PHP_CodeSniffer (Drupal coding standards) as the deterministic source of
+# truth for rule-based Drupal/PHP checks (dependency injection, coding
+# standards). The tool verifies phpcs actually runs the Drupal standard before
+# relying on it; if it can't, the LLM keeps checking those rules. Omit this
+# block for "auto" (run when phpcs is found). When PHP runs in a container,
+# invoke phpcs through it.
+phpcs:
+  command: "lando phpcs"     # or "ddev exec phpcs"; omit when phpcs is on PATH
 
 # Files and directories to exclude from review.
 # Supports exact paths, glob patterns, and directory prefixes.
@@ -343,6 +365,44 @@ Make sure `drupal/coder` is installed **inside the container** (run the `compose
 above through `ddev composer` / `lando composer` so it lands in the container's vendor/).
 
 Currently PHP/Drupal only — JS, CSS, and YAML are still reviewed by the LLM.
+
+---
+
+### verify
+
+```yaml
+verify: true                 # off when omitted
+verify_model: "qwen3.5:27b"  # optional — defaults to the review model
+```
+
+**Type:** boolean (optional) + string (optional)
+
+**Default:** `false`
+
+An opt-in **LLM second pass** that re-checks findings the deterministic gates
+can't judge. The evidence, existence, and promoted-constructor gates catch
+*fabricated* code, but not a finding that quotes **real** code while
+**misreading** it — a "missing" null check that sits on the next line, a
+"missing" try/catch that's actually present a few lines down, a `||` guard read
+out of evaluation order.
+
+When enabled, each **bug** and **security** finding is sent back to the model on
+its own — with the file's numbered code and one question: *is this specific
+defect really present in this code?* A finding the judge rejects is dropped; a
+finding it confirms, an errored/timed-out call, or an unparseable verdict is
+**kept** (the pass only ever drops on a clear "invalid", like every other gate).
+
+- Scoped to bug/security findings — interpretation hallucinations cluster there;
+  style and phpcs findings are never sent to it.
+- Costs **one extra LLM call per in-scope finding**, so it's off by default and
+  roughly doubles wall-clock on a finding-heavy review. Turn it on for a final
+  pre-PR pass, not every iteration.
+- **`verify_model`** lets a larger, more reliable judge vet a smaller model's
+  findings (e.g. review with `qwen3.5:9b`, verify with `qwen3.5:27b`). Defaults
+  to the review model.
+- CLI/REPL equivalents: `code-review --verify …` and `/review --verify`.
+
+Each dropped finding is recorded in the log with the judge's reason.
 
 ---
 

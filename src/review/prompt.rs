@@ -41,33 +41,42 @@ pub(crate) fn build_user_prompt(diffs: &[FileDiff]) -> String {
     ));
 
     for diff in diffs {
-        prompt.push_str(&format!("=== {} ({}) ===\n", diff.path, diff.status));
-        for hunk in &diff.hunks {
-            prompt.push_str(&format!(
-                "--- lines {}-{} → {}-{} ---\n",
-                hunk.old_start,
-                hunk.old_start + hunk.old_lines,
-                hunk.new_start,
-                hunk.new_start + hunk.new_lines
-            ));
-            // Number every new-file line so the model cites real locations
-            // instead of estimating (deletions get no number — they don't
-            // exist in the new file).
-            let mut n = hunk.new_start.max(1);
-            for line in hunk.content.lines() {
-                if line.starts_with('-') {
-                    prompt.push_str(&format!("    | {line}\n"));
-                } else {
-                    prompt.push_str(&format!("{n:>4}| {line}\n"));
-                    n += 1;
-                }
-            }
-        }
+        prompt.push_str(&numbered_diff_block(diff));
         prompt.push('\n');
     }
 
     prompt.push_str("Analyze the changes and output issues as a JSON array.");
     prompt
+}
+
+/// Render one file's diff with new-file line numbers, exactly as the review
+/// agents see it. Shared by the review prompt and the Tier-4 verify prompt so
+/// the verifier judges a finding against identical numbering.
+pub(crate) fn numbered_diff_block(diff: &FileDiff) -> String {
+    let mut block = String::new();
+    block.push_str(&format!("=== {} ({}) ===\n", diff.path, diff.status));
+    for hunk in &diff.hunks {
+        block.push_str(&format!(
+            "--- lines {}-{} → {}-{} ---\n",
+            hunk.old_start,
+            hunk.old_start + hunk.old_lines,
+            hunk.new_start,
+            hunk.new_start + hunk.new_lines
+        ));
+        // Number every new-file line so the model cites real locations
+        // instead of estimating (deletions get no number — they don't
+        // exist in the new file).
+        let mut n = hunk.new_start.max(1);
+        for line in hunk.content.lines() {
+            if line.starts_with('-') {
+                block.push_str(&format!("    | {line}\n"));
+            } else {
+                block.push_str(&format!("{n:>4}| {line}\n"));
+                n += 1;
+            }
+        }
+    }
+    block
 }
 
 #[cfg(test)]

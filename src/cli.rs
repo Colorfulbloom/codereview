@@ -34,6 +34,13 @@ pub struct Cli {
     #[arg(long, short)]
     pub model: Option<String>,
 
+    /// Verify findings with an LLM second pass: re-check each bug/security
+    /// finding against the code and drop interpretation hallucinations (a
+    /// "missing" check that exists on the next line, etc.). Adds one LLM call
+    /// per in-scope finding. Equivalent to `verify: true` in .codereview.yaml.
+    #[arg(long)]
+    pub verify: bool,
+
     /// Output file path (for markdown/json formats).
     #[arg(long, short)]
     pub output: Option<String>,
@@ -111,6 +118,15 @@ mod tests {
     fn cli_parses_model_flag() {
         let cli = Cli::parse_from(["code-review", "-m", "gemma4"]);
         assert_eq!(cli.model.as_deref(), Some("gemma4"));
+    }
+
+    #[test]
+    fn cli_parses_verify_flag() {
+        let cli = Cli::parse_from(["code-review", "--uncommitted", "--verify"]);
+        assert!(cli.verify);
+
+        let cli = Cli::parse_from(["code-review"]);
+        assert!(!cli.verify);
     }
 
     #[test]

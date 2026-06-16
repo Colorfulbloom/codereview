@@ -191,11 +191,22 @@ extra LLM calls:
   project or framework source (e.g. `vendor/`, Drupal `core/`). This kills the
   most damaging false positives -- the ones that push you to revert correct
   code.
+- **Promoted-constructor gate** -- a "property never defined / mismatch" finding
+  is dropped when the constructor uses PHP 8 property promotion (the model
+  misreading promoted params as undefined).
 
 Each discarded finding is recorded in the log with the reason (and, for the
-existence gate, the `file:line` proof). Interpretation-level mistakes (e.g.
-"SQL injection" on a parameterized query) are not yet auto-filtered -- see
-[docs/ROADMAP.md](docs/ROADMAP.md) for the planned `--verify` second pass.
+existence gate, the `file:line` proof).
+
+Those checks are deterministic and free, but they can't catch a finding that
+quotes *real* code while *misreading* it -- a "missing" null check that sits on
+the next line, a "missing" try/catch that's actually present, a `||` guard read
+out of evaluation order. For those, add **`--verify`** (or `verify: true` in
+config): an opt-in LLM second pass that re-checks each bug/security finding
+against its code and drops the ones it judges to misread correct code. It costs
+one extra LLM call per in-scope finding, so it's off by default; point it at a
+larger judge model with `verify_model:` if you like. See
+[verify config](docs/CONFIGURATION.md#verify).
 
 ---
 
@@ -297,6 +308,7 @@ Launch the REPL with `code-review`. The prompt is `cr>`. Tab completion is suppo
 | `/review`              | Run a code review on your current changes (staged, unstaged, untracked) |
 | `/review <path>`       | Review a file or directory as-is, regardless of git state           |
 | `/review --diff <ref>` | Review your branch's commits vs a base (pre-PR review)              |
+| `/review --verify`     | Add the anti-hallucination second pass (combine with any of the above) |
 | `/diff`           | View the current diff (colored: green = added, red = removed)       |
 | `/rules`          | Show active review rules per detected language                      |
 | `/commit`         | Stage files and commit with an AI-generated message                 |
@@ -357,6 +369,7 @@ code-review --diff main -m qwen3-coder:30b --format json
 | `--diff <REF>`    |       | Base to diff commits against (branch, tag, SHA, `HEAD~N`); uses the merge base, like a PR | (enters REPL)     |
 | `--path <PATH>`   |       | Review a file/directory as-is (takes precedence over `--diff`) | (enters REPL)     |
 | `--uncommitted`   |       | Review uncommitted changes (staged, unstaged, untracked) | (enters REPL)     |
+| `--verify`        |       | LLM second pass: re-check each bug/security finding, drop interpretation hallucinations (one extra call per in-scope finding) | off |
 | `--format <FMT>`  |       | `terminal`, `json`, `markdown`, `annotations`        | `terminal`        |
 | `--model <NAME>`  | `-m`  | Override the Ollama model                            | (from onboarding) |
 | `--output <PATH>` | `-o`  | Write output to file                                 | (stdout)          |

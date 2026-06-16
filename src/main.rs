@@ -111,9 +111,14 @@ fn run_noninteractive(
     let git = LiveGitAgent::new(project_root.to_path_buf());
 
     let config_path = project_root.join(".codereview.yaml");
-    let (config, warning) = Config::load_lenient(&config_path);
+    let (mut config, warning) = Config::load_lenient(&config_path);
     if let Some(warning) = warning {
         eprintln!("{warning}");
+    }
+    // --verify forces the Tier-4 second pass on, regardless of config. (Config
+    // `verify: true` still enables it without the flag.)
+    if cli.verify {
+        config.verify = Some(true);
     }
     let ollama = runtime::LiveOllamaClient::with_timeout(config.llm_timeout());
 
@@ -154,6 +159,10 @@ fn run_noninteractive(
             lang_list.join(", ")
         );
         eprintln!("Model: {model}");
+        if config.verify_enabled() {
+            let vmodel = config.verify_model().unwrap_or(&model);
+            eprintln!("Verify: on — bug/security findings get a second pass ({vmodel})");
+        }
     }
 
     // Per-agent progress: a live spinner on a terminal, plain lines otherwise

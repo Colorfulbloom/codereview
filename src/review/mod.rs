@@ -8,6 +8,7 @@ pub mod parser;
 pub mod phpcs;
 pub mod prompt;
 pub mod source;
+pub mod verify;
 
 #[cfg(test)]
 pub mod testutil;

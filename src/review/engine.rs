@@ -171,14 +171,15 @@ pub async fn run_review(
         Vec::new()
     };
 
-    // Run specialized sub-agents via the orchestrator
+    // Run specialized sub-agents via the orchestrator. `on_agent` is only
+    // borrowed (via this wrapper) so it stays usable for the verify pass below.
     let (findings, agent_runs) = agents::orchestrator::run_agents(
         &diffs,
         &languages,
         config,
         model,
         ollama,
-        on_agent,
+        |name: &str| on_agent(name),
         cache,
         phpcs_active,
     )
@@ -191,9 +192,34 @@ pub async fn run_review(
     // Deterministic hallucination gate: drop "API X does not exist → fatal
     // error" findings when X is actually defined in the project/framework
     // source. Only pays for a source scan when such a claim is present.
-    let mut findings = if claims::any_existence_claim(&findings) {
+    let findings = if claims::any_existence_claim(&findings) {
         let index = claims::SourceIndex::build(&existence_search_roots(git, &target));
         claims::verify_existence_claims(findings, &index)
+    } else {
+        findings
+    };
+
+    // Tier 4 (opt-in): interpretation gate. Re-check each in-scope (bug/
+    // security) finding against its code and drop the ones a focused second
+    // pass judges to misread correct code. Runs on the LLM findings only — the
+    // phpcs findings merged below are deterministic and never verified. Keeps
+    // on any uncertainty, like every other gate.
+    let mut findings = if config.verify_enabled() {
+        let verify_model = config.verify_model().unwrap_or(model);
+        on_agent("Verifying findings (second pass)");
+        let budget =
+            agents::orchestrator::resolve_context_budget(ollama, verify_model, config).await;
+        let before = findings.len();
+        let kept =
+            crate::review::verify::verify_findings(findings, &diffs, ollama, verify_model, budget)
+                .await;
+        crate::logging::info(format!(
+            "verify pass: {} finding(s) -> {} kept ({} dropped)",
+            before,
+            kept.len(),
+            before - kept.len()
+        ));
+        kept
     } else {
         findings
     };
@@ -542,6 +568,143 @@ mod tests {
             result.findings.iter().any(|f| f.description.contains("dependency injection")),
             "phpcs finding missing from result"
         );
+    }
+
+    /// Mock that answers agent calls with one finding response and verify-pass
+    /// calls with a verdict, routed by the verify system prompt.
+    struct VerifyAwareMock {
+        findings: String,
+        verdict: String,
+    }
+
+    impl VerifyAwareMock {
+        fn new(findings: &str, verdict: &str) -> Self {
+            Self {
+                findings: findings.to_string(),
+                verdict: verdict.to_string(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OllamaClient for VerifyAwareMock {
+        fn is_installed(&self) -> bool {
+            true
+        }
+        async fn is_running(&self) -> bool {
+            true
+        }
+        async fn start(&self) -> Result<(), crate::onboarding::error::OnboardingError> {
+            Ok(())
+        }
+        async fn version(&self) -> Result<String, crate::onboarding::error::OnboardingError> {
+            Ok("mock".into())
+        }
+        async fn list_models(
+            &self,
+        ) -> Result<Vec<String>, crate::onboarding::error::OnboardingError> {
+            Ok(vec!["test".into()])
+        }
+        async fn pull_model(
+            &self,
+            _: &str,
+        ) -> Result<(), crate::onboarding::error::OnboardingError> {
+            Ok(())
+        }
+        async fn chat(
+            &self,
+            _model: &str,
+            system: &str,
+            _user: &str,
+        ) -> Result<String, crate::onboarding::error::OnboardingError> {
+            if system.contains("verifying ONE code-review finding") {
+                Ok(self.verdict.clone())
+            } else {
+                Ok(self.findings.clone())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_review_verify_pass_drops_rejected_bug_finding() {
+        // A bug finding that the verify pass judges to misread the code must be
+        // dropped only when `verify` is enabled.
+        let git = MockGitAgent::in_repo().with_unstaged(
+            vec![],
+            vec![make_file_diff(
+                "src/Foo.php",
+                FileStatus::Modified,
+                "+$data = json_decode($body, TRUE);",
+            )],
+        );
+        let bug = r#"[{"file_path":"src/Foo.php","line_number":1,"severity":"error","category":"bug","title":"Missing null check","description":"json_decode null not checked","suggestion":"add a check","evidence":"$data = json_decode($body, TRUE);"}]"#;
+        let formatter = TerminalFormatter;
+
+        // verify OFF (default): the finding survives untouched.
+        let plain = MockReviewOllama::with_response(bug);
+        let (_, off) = run_review(
+            &git,
+            &plain,
+            &formatter,
+            "m",
+            &Config::default(),
+            ReviewTarget::WorkingTree,
+            |_: &str| {},
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(off.total_findings(), 1, "verify off must keep the finding");
+
+        // verify ON: the verifier rejects it as a misread → dropped.
+        let routed = VerifyAwareMock::new(bug, r#"{"valid": false, "reason": "checked next line"}"#);
+        let cfg_on = Config::parse("verify: true\n").unwrap();
+        let (_, on) = run_review(
+            &git,
+            &routed,
+            &formatter,
+            "m",
+            &cfg_on,
+            ReviewTarget::WorkingTree,
+            |_: &str| {},
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            on.total_findings(),
+            0,
+            "verify on must drop the rejected finding"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_review_verify_pass_keeps_confirmed_finding() {
+        let git = MockGitAgent::in_repo().with_unstaged(
+            vec![],
+            vec![make_file_diff("src/app.php", FileStatus::Modified, "+eval($x);")],
+        );
+        let bug = r#"[{"file_path":"src/app.php","line_number":1,"severity":"error","category":"security","title":"Eval usage","description":"eval on input","suggestion":"avoid eval","evidence":"eval($x);"}]"#;
+        let routed = VerifyAwareMock::new(bug, r#"{"valid": true, "reason": "genuine"}"#);
+        let cfg_on = Config::parse("verify: true\n").unwrap();
+        let formatter = TerminalFormatter;
+
+        let (_, on) = run_review(
+            &git,
+            &routed,
+            &formatter,
+            "m",
+            &cfg_on,
+            ReviewTarget::WorkingTree,
+            |_: &str| {},
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(on.total_findings(), 1, "a confirmed finding must survive");
     }
 
     #[tokio::test]

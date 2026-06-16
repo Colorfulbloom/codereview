@@ -310,7 +310,7 @@ async fn review_with_cache(
 /// budget (or the built-in default) capped by the model's detected maximum,
 /// and `think: false` for thinking-capable models so review calls return JSON
 /// instead of burning the timeout on reasoning tokens.
-async fn resolve_context_budget(
+pub(crate) async fn resolve_context_budget(
     ollama: &dyn OllamaClient,
     model: &str,
     config: &Config,

@@ -7,7 +7,12 @@ Each entry records the motivation so future work doesn't have to rediscover it.
 
 ## Tier 4: `--verify` — LLM second-pass finding verification
 
-**Status:** designed, not started. Deferred by choice on 2026-06-12.
+**Status:** ✅ IMPLEMENTED 2026-06-15 (`src/review/verify.rs`). Opt-in via
+`--verify` / `verify: true`; `verify_model:` overrides the judge. Scoped to
+bug/security findings, per-finding, keep-on-uncertainty. The two observed
+examples below ship as regression fixtures. Design record kept for context.
+
+**Original status:** designed, not started. Deferred by choice on 2026-06-12.
 
 **Context:** A real-world review of a Drupal module (qwen3.5:9b-mlx, 100
 findings) measured ~44% precision — ~41 findings were hallucinated. Tiers 1–3
