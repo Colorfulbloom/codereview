@@ -173,6 +173,10 @@ fn run_noninteractive(
     };
 
     let cache = code_review::review::cache::SqliteCache::new(conn);
+    let phpcs = code_review::review::phpcs::LivePhpcsRunner::from_config(
+        project_root.to_path_buf(),
+        &config,
+    );
     let result = rt.block_on(engine::run_review(
         &git,
         &ollama,
@@ -185,6 +189,7 @@ fn run_noninteractive(
             None => eprintln!("  {agent}..."),
         },
         Some(&cache),
+        Some(&phpcs),
     ));
 
     if let Some(pb) = &spinner {

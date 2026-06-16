@@ -93,6 +93,25 @@ fn verify_finding(raw: RawFinding, diffs: &[FileDiff]) -> Result<ReviewFinding, 
     finding.file_path = diff.path.clone();
 
     let lines: Vec<(usize, String)> = new_file_lines(diff).collect();
+
+    // Promoted-constructor gate: a "property mismatch / never defined" claim
+    // about a class that uses PHP 8 constructor property promotion is the model
+    // misreading promoted params as undefined properties — drop it. Only drops
+    // on positive proof of a promoted constructor in the reviewed file.
+    if is_constructor_property_claim(&finding.title, &finding.description) {
+        let content: String = lines
+            .iter()
+            .map(|(_, c)| c.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if has_promoted_constructor(&content) {
+            return discard(
+                &finding,
+                "constructor-property claim, but the class uses promoted constructor properties",
+            );
+        }
+    }
+
     let whole_file: String = lines.iter().map(|(_, c)| normalize(c)).collect();
 
     // A longer "fix" that already exists verbatim in the file is equally a
@@ -150,6 +169,34 @@ fn is_var_modernization_claim(title: &str, description: &str, suggestion: &str) 
 /// an identifier like `myvar` or `variance`.
 fn line_has_var_keyword(line: &str) -> bool {
     contains_word(line, "var")
+}
+
+/// Whether a finding claims a constructor "property mismatch" / "property never
+/// defined". Local models misread PHP 8 *promoted* constructor properties (e.g.
+/// `private readonly Connection $database`) as undefined and invent a "PHP
+/// error" — see [`has_promoted_constructor`].
+fn is_constructor_property_claim(title: &str, description: &str) -> bool {
+    let text = format!("{title} {description}").to_lowercase();
+    text.contains("property")
+        && (text.contains("mismatch")
+            || text.contains("never defined")
+            || text.contains("never declared")
+            || text.contains("not defined")
+            || text.contains("not declared"))
+}
+
+/// Whether `code` defines a constructor using PHP 8 property promotion — i.e. a
+/// visibility keyword appears in the `__construct` *parameter list* (before the
+/// body `{`). A plain constructor's params have no visibility keyword.
+fn has_promoted_constructor(code: &str) -> bool {
+    let Some(start) = code.find("function __construct") else {
+        return false;
+    };
+    let after = &code[start..];
+    let signature = &after[..after.find('{').unwrap_or(after.len())];
+    ["private", "protected", "public"]
+        .iter()
+        .any(|kw| contains_word(signature, kw))
 }
 
 /// Case-sensitive whole-word search: `word` must be delimited by a
@@ -540,6 +587,69 @@ mod tests {
         let findings = parse_and_verify_response(response, &js_chunk());
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].line_number, 3);
+    }
+
+    // ── Promoted-constructor gate (round-6 triage) ──
+
+    #[test]
+    fn detects_constructor_property_claims() {
+        assert!(is_constructor_property_claim(
+            "Property name mismatch in constructor assignment",
+            "The property is declared as `$database` but the code assigns to `$this->configFactory`. configFactory was never defined.",
+        ));
+        // Unrelated findings must not match.
+        assert!(!is_constructor_property_claim("SQL injection", "raw query from input"));
+        assert!(!is_constructor_property_claim("Missing doc comment", "add a docblock"));
+    }
+
+    #[test]
+    fn detects_promoted_constructor() {
+        let promoted = "class X {\n  public function __construct(\n    private readonly Connection $database,\n    ConfigFactoryInterface $config_factory,\n  ) {\n    $this->configFactory = $config_factory;\n  }\n}";
+        assert!(has_promoted_constructor(promoted));
+
+        let plain = "class X {\n  public function __construct(Connection $database) {\n    $this->database = $database;\n  }\n}";
+        assert!(!has_promoted_constructor(plain));
+
+        assert!(!has_promoted_constructor("class X {\n  public function foo() {}\n}"));
+    }
+
+    #[test]
+    fn promoted_constructor_property_mismatch_is_dropped() {
+        // The exact round-6 hallucination: "property mismatch" invented on a
+        // class that uses PHP 8 constructor property promotion.
+        let diff = FileDiff {
+            path: "src/Foo.php".into(),
+            status: FileStatus::Added,
+            hunks: vec![DiffHunk {
+                old_start: 0,
+                old_lines: 0,
+                new_start: 1,
+                new_lines: 6,
+                content: "+<?php\n+class Foo {\n+  public function __construct(private readonly Connection $database, ConfigFactoryInterface $config_factory) {\n+    $this->configFactory = $config_factory;\n+  }\n+}".into(),
+            }],
+        };
+        let response = r#"[{"file_path":"src/Foo.php","line_number":4,"severity":"error","category":"bug","title":"Property name mismatch in constructor assignment","description":"The property is declared as `$database` but the code assigns to `$this->configFactory`. configFactory was never defined.","suggestion":"assign to config_factory instead","evidence":"$this->configFactory = $config_factory;"}]"#;
+        let findings = parse_and_verify_response(response, &[diff]);
+        assert!(findings.is_empty(), "promoted-ctor property mismatch must be dropped");
+    }
+
+    #[test]
+    fn property_mismatch_kept_on_plain_constructor() {
+        // A non-promoted constructor keeps the finding — it could be a real bug.
+        let diff = FileDiff {
+            path: "src/Bar.php".into(),
+            status: FileStatus::Added,
+            hunks: vec![DiffHunk {
+                old_start: 0,
+                old_lines: 0,
+                new_start: 1,
+                new_lines: 6,
+                content: "+<?php\n+class Bar {\n+  public function __construct(Connection $db) {\n+    $this->databse = $db;\n+  }\n+}".into(),
+            }],
+        };
+        let response = r#"[{"file_path":"src/Bar.php","line_number":4,"severity":"error","category":"bug","title":"Property name mismatch","description":"property never defined","suggestion":"fix the property name","evidence":"$this->databse = $db;"}]"#;
+        let findings = parse_and_verify_response(response, &[diff]);
+        assert_eq!(findings.len(), 1, "plain-constructor mismatch is kept");
     }
 
     #[test]

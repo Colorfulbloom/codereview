@@ -5,6 +5,7 @@ pub mod claims;
 pub mod engine;
 pub mod models;
 pub mod parser;
+pub mod phpcs;
 pub mod prompt;
 pub mod source;
 

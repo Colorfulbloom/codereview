@@ -344,6 +344,11 @@ fn handle_review(ctx: &SessionContext, target: ReviewTarget) {
     spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
     let cache = crate::review::cache::SqliteCache::new(ctx.db);
+    let phpcs_root = ctx
+        .git
+        .repo_root()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let phpcs = crate::review::phpcs::LivePhpcsRunner::from_config(phpcs_root, &ctx.config);
     let result = ctx.rt.block_on(engine::run_review(
         ctx.git,
         ctx.ollama,
@@ -353,6 +358,7 @@ fn handle_review(ctx: &SessionContext, target: ReviewTarget) {
         target,
         |agent| spinner.set_message(format!("{agent}: reviewing with {}...", ctx.model)),
         Some(&cache),
+        Some(&phpcs),
     ));
 
     spinner.finish_and_clear();

@@ -55,6 +55,31 @@ pub struct Config {
     /// the timeout entirely. Defaults to 300 when unset.
     #[serde(default)]
     pub llm_timeout_seconds: Option<u64>,
+
+    /// PHP_CodeSniffer (Drupal coding standards) as a deterministic finding
+    /// source for the rule-based Drupal/PHP checks.
+    #[serde(default)]
+    pub phpcs: PhpcsConfig,
+}
+
+/// Configuration for the phpcs (Drupal coding standards) finding source.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PhpcsConfig {
+    /// `None` (absent) = auto: run phpcs when it's installed. `Some(false)`
+    /// disables it; `Some(true)` forces it on (still only runs if installed).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+
+    /// phpcs standard(s). Defaults to `Drupal,DrupalPractice`.
+    #[serde(default)]
+    pub standard: Option<String>,
+
+    /// How to invoke phpcs. A space-separated command — e.g. `vendor/bin/phpcs`,
+    /// or a container wrapper like `ddev exec phpcs` / `lando phpcs` /
+    /// `docker compose exec -T php phpcs` when PHP lives in a container. When
+    /// unset, phpcs is located at `vendor/bin/phpcs` or on `PATH`.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 /// Override for a built-in rule.
@@ -169,6 +194,22 @@ impl Config {
         self.llm_timeout_seconds.unwrap_or(300)
     }
 
+    /// Whether phpcs is explicitly disabled (`phpcs.enabled: false`). Absent or
+    /// `true` means "run it if installed".
+    pub fn phpcs_disabled(&self) -> bool {
+        self.phpcs.enabled == Some(false)
+    }
+
+    /// phpcs standard(s) to run (configured or the Drupal default).
+    pub fn phpcs_standard(&self) -> &str {
+        self.phpcs.standard.as_deref().unwrap_or("Drupal,DrupalPractice")
+    }
+
+    /// Explicit phpcs invocation command, if configured (e.g. `ddev exec phpcs`).
+    pub fn phpcs_command(&self) -> Option<&str> {
+        self.phpcs.command.as_deref()
+    }
+
     /// Load config from a YAML file, falling back to defaults on any error.
     ///
     /// A missing file is normal (no warning). An unreadable or invalid file
@@ -261,6 +302,24 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phpcs_config_defaults_and_overrides() {
+        // Absent → auto (not disabled), default Drupal standard.
+        let c = Config::parse("").unwrap();
+        assert!(!c.phpcs_disabled());
+        assert_eq!(c.phpcs_standard(), "Drupal,DrupalPractice");
+
+        // Explicit disable + custom standard.
+        let c = Config::parse("phpcs:\n  enabled: false\n  standard: Drupal\n").unwrap();
+        assert!(c.phpcs_disabled());
+        assert_eq!(c.phpcs_standard(), "Drupal");
+        assert_eq!(c.phpcs_command(), None);
+
+        // Container command override.
+        let c = Config::parse("phpcs:\n  command: \"ddev exec phpcs\"\n").unwrap();
+        assert_eq!(c.phpcs_command(), Some("ddev exec phpcs"));
+    }
 
     #[test]
     fn llm_timeout_parsed_and_defaulted() {

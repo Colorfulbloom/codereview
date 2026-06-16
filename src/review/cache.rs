@@ -20,10 +20,11 @@ use rusqlite::Connection;
 use super::models::ReviewFinding;
 use crate::language::rules::Rule;
 
-/// Bump this whenever an agent's prompt or the finding schema changes — the
-/// model would now produce different output, so every cached entry must be
-/// considered stale. (Rules and model are already part of the key.)
-const PROMPT_VERSION: u32 = 1;
+/// Bump this whenever an agent's prompt, the finding schema, OR the verification
+/// gates change — cached findings are then stale (they were produced under the
+/// old logic). v2: added the promoted-constructor gate (parser.rs).
+/// (Rules and model are already part of the key.)
+const PROMPT_VERSION: u32 = 2;
 
 /// A cache of per-file review findings.
 pub trait FindingCache {

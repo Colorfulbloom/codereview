@@ -131,6 +131,7 @@ pub async fn run_review(
     target: ReviewTarget<'_>,
     on_agent: impl Fn(&str),
     cache: Option<&dyn crate::review::cache::FindingCache>,
+    phpcs: Option<&dyn crate::review::phpcs::PhpcsRunner>,
 ) -> Result<(String, ReviewResult), ReviewError> {
     let start = Instant::now();
 
@@ -145,9 +146,30 @@ pub async fn run_review(
     // Detect languages from the changed files
     let languages = detect_review_languages(git, &target, &diffs);
 
+    // phpcs owns the deterministic Drupal/PHP rules when it's installed and not
+    // disabled. When active, the LLM agents drop those rules (no double-report /
+    // re-hallucination); when phpcs can't run, the LLM keeps checking them.
+    let phpcs_active = match phpcs {
+        Some(r) => !config.phpcs_disabled() && r.available(),
+        None => false,
+    };
+
     crate::logging::info(format!(
-        "review started: target={target:?} model={model} files={files_reviewed} languages={languages:?}"
+        "review started: target={target:?} model={model} files={files_reviewed} languages={languages:?} phpcs={phpcs_active}"
     ));
+
+    // PHPCS first — deterministic and fast — and surfaced as progress like an
+    // agent so the user sees it running. Calling `on_agent` here borrows it; it
+    // is still moved into `run_agents` below.
+    let phpcs_findings = if phpcs_active && let Some(runner) = phpcs {
+        on_agent("PHPCS (Drupal coding standards)");
+        let files = crate::review::phpcs::php_review_files(&diffs);
+        let f = crate::review::phpcs::collect_findings(runner, &files, config.phpcs_standard());
+        crate::logging::info(format!("phpcs contributed {} finding(s)", f.len()));
+        f
+    } else {
+        Vec::new()
+    };
 
     // Run specialized sub-agents via the orchestrator
     let (findings, agent_runs) = agents::orchestrator::run_agents(
@@ -158,6 +180,7 @@ pub async fn run_review(
         ollama,
         on_agent,
         cache,
+        phpcs_active,
     )
     .await
     .map_err(|e| {
@@ -168,12 +191,16 @@ pub async fn run_review(
     // Deterministic hallucination gate: drop "API X does not exist → fatal
     // error" findings when X is actually defined in the project/framework
     // source. Only pays for a source scan when such a claim is present.
-    let findings = if claims::any_existence_claim(&findings) {
+    let mut findings = if claims::any_existence_claim(&findings) {
         let index = claims::SourceIndex::build(&existence_search_roots(git, &target));
         claims::verify_existence_claims(findings, &index)
     } else {
         findings
     };
+
+    // Merge phpcs's deterministic findings (collected above, before the agents).
+    // They need no verification gate — phpcs reports only what its sniffs match.
+    findings.extend(phpcs_findings);
 
     let rules_applied: usize = agent_runs.iter().map(|r| r.rules_count).sum();
     let languages_detected: Vec<String> = languages.iter().map(|l| l.to_string()).collect();
@@ -269,7 +296,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let result = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None).await;
+        let result = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None).await;
         assert!(matches!(result, Err(ReviewError::NotARepo)));
     }
 
@@ -279,7 +306,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let result = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None).await;
+        let result = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None).await;
         assert!(matches!(result, Err(ReviewError::NoChanges)));
     }
 
@@ -397,6 +424,7 @@ mod tests {
             ReviewTarget::WorkingTree,
             |_: &str| {},
             None,
+            None,
         )
         .await
         .unwrap();
@@ -438,6 +466,7 @@ mod tests {
             ReviewTarget::WorkingTree,
             |_: &str| {},
             None,
+            None,
         )
         .await
         .unwrap();
@@ -464,6 +493,7 @@ mod tests {
             ReviewTarget::WorkingTree,
             |agent| started.lock().unwrap().push(agent.to_string()),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -471,6 +501,47 @@ mod tests {
         let names = started.lock().unwrap();
         assert!(names.iter().any(|n| n == "Security"), "got: {names:?}");
         assert!(names.iter().any(|n| n == "Bug Detection"), "got: {names:?}");
+    }
+
+    #[tokio::test]
+    async fn run_review_reports_phpcs_progress_and_merges_findings() {
+        let git = MockGitAgent::in_repo().with_unstaged(
+            vec![],
+            vec![make_file_diff("src/Foo.php", FileStatus::Modified, "+<?php")],
+        );
+        let ollama = MockReviewOllama::with_response("[]");
+        let formatter = TerminalFormatter;
+        let phpcs_json = r#"{"files":{"src/Foo.php":{"messages":[
+          {"message":"Use dependency injection.","source":"DrupalPractice.Objects.GlobalDrupal","type":"ERROR","line":3}
+        ]}}}"#;
+        let phpcs = crate::review::phpcs::MockPhpcsRunner { json: Some(phpcs_json.into()) };
+        let started = Mutex::new(Vec::<String>::new());
+
+        let (_, result) = run_review(
+            &git,
+            &ollama,
+            &formatter,
+            "m",
+            &Config::default(),
+            ReviewTarget::WorkingTree,
+            |agent| started.lock().unwrap().push(agent.to_string()),
+            None,
+            Some(&phpcs),
+        )
+        .await
+        .unwrap();
+
+        // The phpcs step must be surfaced as progress, like the LLM agents.
+        assert!(
+            started.lock().unwrap().iter().any(|n| n.contains("PHPCS")),
+            "phpcs progress not reported: {:?}",
+            started.lock().unwrap()
+        );
+        // ...and its deterministic findings must appear in the result.
+        assert!(
+            result.findings.iter().any(|f| f.description.contains("dependency injection")),
+            "phpcs finding missing from result"
+        );
     }
 
     #[tokio::test]
@@ -496,6 +567,7 @@ mod tests {
             &Config::default(),
             ReviewTarget::WorkingTree,
             |_: &str| {},
+            None,
             None,
         )
         .await
@@ -523,7 +595,7 @@ mod tests {
         let formatter = TerminalFormatter;
 
         let (output, result) =
-            run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None)
+            run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None)
                 .await
                 .unwrap();
 
@@ -541,7 +613,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("");
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None)
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None)
             .await
             .unwrap();
         assert_eq!(result.total_findings(), 0);
@@ -557,7 +629,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("This is not JSON at all");
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None)
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None)
             .await
             .unwrap();
         assert_eq!(result.total_findings(), 0);
@@ -588,7 +660,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response(response);
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None)
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None)
             .await
             .unwrap();
 
@@ -613,7 +685,7 @@ mod tests {
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None)
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &Config::default(), ReviewTarget::WorkingTree, |_: &str| {}, None, None)
             .await
             .unwrap();
 
@@ -642,7 +714,7 @@ exclude:
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let (_, result) = run_review(&git, &ollama, &formatter, "test", &config, ReviewTarget::WorkingTree, |_: &str| {}, None)
+        let (_, result) = run_review(&git, &ollama, &formatter, "test", &config, ReviewTarget::WorkingTree, |_: &str| {}, None, None)
             .await
             .unwrap();
 
@@ -672,7 +744,7 @@ exclude:
         let ollama = MockReviewOllama::with_response("[]");
         let formatter = TerminalFormatter;
 
-        let result = run_review(&git, &ollama, &formatter, "test", &config, ReviewTarget::WorkingTree, |_: &str| {}, None).await;
+        let result = run_review(&git, &ollama, &formatter, "test", &config, ReviewTarget::WorkingTree, |_: &str| {}, None, None).await;
         assert!(matches!(result, Err(ReviewError::NoChanges)));
     }
 }

@@ -10,6 +10,7 @@ Built for development teams that cannot use paid AI platforms (Claude, ChatGPT, 
 
 - **Specialized sub-agents** -- Security, Bug Detection, Style, Accessibility, and Custom agents each make focused LLM calls for higher accuracy
 - **Local AI** -- uses Ollama with any model that fits your hardware. No data leaves your machine
+- **Deterministic + AI** -- when `phpcs` + Drupal standards are installed, the rule-based Drupal/PHP checks (dependency injection, coding standards) come from PHP_CodeSniffer (exact, no hallucination); the LLM is reserved for the semantic findings a linter can't make. See [phpcs config](docs/CONFIGURATION.md#phpcs).
 - **Language-aware** -- [43 built-in rules](#built-in-rules) for PHP, Drupal, JavaScript, CSS, HTML/Twig, and YAML
 - **Review anything** -- your uncommitted changes, your branch's commits before a PR (`--diff` / `/review --diff <ref>`), or any module, theme, or file as-is (`--path` / `/review <path>`)
 - **Reviews uncommitted *and* untracked code** -- brand-new files don't need to be `git add`ed first

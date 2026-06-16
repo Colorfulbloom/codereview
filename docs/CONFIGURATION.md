@@ -270,6 +270,82 @@ Note: on reasoning-capable models (qwen3.5, deepseek-r1, etc.) the tool automati
 
 ---
 
+### phpcs
+
+```yaml
+phpcs:
+  enabled: true              # omit = auto (run when installed); false to disable
+  standard: "Drupal,DrupalPractice"
+```
+
+**Type:** block (optional)
+
+When PHP_CodeSniffer and the Drupal coding standards (`drupal/coder`) are installed,
+the tool runs `phpcs --standard=Drupal,DrupalPractice` as a **deterministic source of
+truth** for the rule-based Drupal/PHP checks (dependency injection, PSR-12, naming,
+coding standards) — the same tool Drupal core's own CI uses. Those findings are exact:
+no invented service IDs, no miscounts, no misread constructors.
+
+When phpcs is active, the LLM **stops checking the rules phpcs covers**
+(`drupal-dependency-injection`, `php-psr12-style`, `drupal-coding-standards`,
+`*-type-declarations`), so it can't hallucinate them — the LLM is left to the semantic
+findings a linter can't make (logic bugs, exploitability). The LLM keeps those rules if
+phpcs isn't installed, so the category is never left unchecked.
+
+- **`enabled`** — omit for *auto* (run when phpcs is found and works); `false` disables it;
+  `true` forces it (still only runs if it works).
+- **`standard`** — phpcs standard(s); defaults to `Drupal,DrupalPractice`.
+- **`command`** — how to invoke phpcs (space-separated). Unset = locate `vendor/bin/phpcs`
+  or `phpcs` on `PATH`. Set this when PHP runs in a container (see below).
+
+phpcs is only treated as active if it **actually runs and lists the configured standard**
+(verified by a `phpcs -i` probe). If php is missing, the standard isn't installed, or phpcs
+lives only in a container, the tool falls back to letting the LLM check those rules — it
+never drops a category and leaves it uncovered.
+
+### Setting up phpcs + the Drupal standard
+
+```bash
+# Install Coder (the Drupal standard) and the auto-registration plugin:
+composer require --dev drupal/coder dealerdirect/phpcodesniffer-composer-installer
+
+# Verify the Drupal standard is registered:
+vendor/bin/phpcs -i        # should list "Drupal, DrupalPractice"
+```
+
+If `phpcs -i` does **not** list `Drupal`, register it manually:
+```bash
+vendor/bin/phpcs --config-set installed_paths vendor/drupal/coder/coder_sniffer
+```
+
+### Running phpcs when PHP is in a container (DDEV / Lando / Docker)
+
+If your project runs PHP inside a container, the host has no `php` to execute
+`vendor/bin/phpcs` — point `command` at the container instead:
+
+```yaml
+# DDEV
+phpcs:
+  command: "ddev exec phpcs"
+
+# Lando (with a "phpcs" tooling command, or via SSH)
+phpcs:
+  command: "lando phpcs"
+
+# Docker Compose (service name "php"; -T disables TTY allocation)
+phpcs:
+  command: "docker compose exec -T php vendor/bin/phpcs"
+```
+
+The command runs from the project root, and file paths are passed repo-relative, so the
+container must mount the project at its working directory (DDEV/Lando do this by default).
+Make sure `drupal/coder` is installed **inside the container** (run the `composer require`
+above through `ddev composer` / `lando composer` so it lands in the container's vendor/).
+
+Currently PHP/Drupal only — JS, CSS, and YAML are still reviewed by the LLM.
+
+---
+
 ## Rule Overrides
 
 Override built-in rules in the `rules` section. Each language has its own block, and each rule is referenced by its ID.

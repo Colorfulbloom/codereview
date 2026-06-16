@@ -44,6 +44,28 @@ Tier 1–3 precision numbers are known from real usage.
 field that Tier 1 introduced — a finding that survived deterministic
 verification already carries its quoted line.
 
+**Observed examples (Tier-4 regression fixtures, captured 2026-06-15):** a
+`qwen3.5:9b` review of the `bcutd_heatmap` module (phpcs active, all other gates
+shipped) produced exactly two false positives, and both are the residual
+interpretation class above — each quoted a real line, so every deterministic
+gate passed, yet each misjudged correct code:
+
+- *"Missing null check after JSON decode"* on `HeatmapTrackController::track`.
+  The model claimed `$data['events']` is dereferenced before any null check.
+  The very next line is `if (!is_array($data) || empty($data['events']) || ...)`
+  — `||` short-circuits on `!is_array($data)` for a `null` decode, so the
+  "offending" access never runs. The model misread boolean evaluation order.
+- *"Missing error handling for external API call"* on
+  `HeatmapDataController::ga4`. The finding's own prose admits the method "HAS a
+  try-catch block (lines 79-86)", then asserts the inputs are unvalidated — but
+  the lines above already do
+  `if (empty($property_id) || empty($credentials_json)) { return ...400; }`.
+  Both premises are false; it describes no real defect.
+
+Both are *self-contained misreads of correct code* — no cross-file context would
+fix them, which is why a focused per-finding second pass (the design above) is
+the right shape. Use these two as the regression fixtures when Tier 4 is built.
+
 ---
 
 ## Agentic verification — model-requested reference lookups

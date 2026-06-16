@@ -28,6 +28,7 @@ pub struct AgentRun {
 }
 
 /// Coordinate specialized sub-agents for a review.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_agents(
     diffs: &[FileDiff],
     languages: &BTreeSet<Language>,
@@ -36,12 +37,19 @@ pub async fn run_agents(
     ollama: &dyn OllamaClient,
     on_agent_start: impl Fn(&str),
     cache: Option<&dyn FindingCache>,
+    phpcs_active: bool,
 ) -> Result<(Vec<ReviewFinding>, Vec<AgentRun>), AgentError> {
     // Collect all effective rules across detected languages
-    let all_rules: Vec<Rule> = languages
+    let mut all_rules: Vec<Rule> = languages
         .iter()
         .flat_map(|lang| config.effective_rules(*lang))
         .collect();
+
+    // When phpcs handles the deterministic Drupal/PHP rules, drop them from the
+    // LLM so it stops (mis)checking what a linter does accurately.
+    if phpcs_active {
+        all_rules.retain(|r| !crate::review::phpcs::is_superseded(&r.id));
+    }
 
     let mut all_findings: Vec<ReviewFinding> = Vec::new();
     let mut runs: Vec<AgentRun> = Vec::new();
@@ -408,14 +416,14 @@ mod tests {
 
         // Cold run populates the cache.
         let ollama = MockOllama::with_response("[]");
-        run_agents(&diffs, &languages, &config, "m", &ollama, |_| {}, Some(&cache))
+        run_agents(&diffs, &languages, &config, "m", &ollama, |_| {}, Some(&cache), false)
             .await
             .unwrap();
         assert!(ollama.call_count() > 0, "cold run must hit the LLM");
 
         // Identical re-review: every file is cached -> zero LLM calls.
         let ollama2 = MockOllama::with_response("[]");
-        run_agents(&diffs, &languages, &config, "m", &ollama2, |_| {}, Some(&cache))
+        run_agents(&diffs, &languages, &config, "m", &ollama2, |_| {}, Some(&cache), false)
             .await
             .unwrap();
         assert_eq!(ollama2.call_count(), 0, "unchanged files must not be re-sent");
@@ -426,7 +434,7 @@ mod tests {
             make_file_diff("b.php", FileStatus::Modified, "+$y = 999;"), // changed
         ];
         let ollama3 = MockOllama::with_response("[]");
-        run_agents(&changed, &languages, &config, "m", &ollama3, |_| {}, Some(&cache))
+        run_agents(&changed, &languages, &config, "m", &ollama3, |_| {}, Some(&cache), false)
             .await
             .unwrap();
         assert!(ollama3.call_count() > 0, "changed file must be reviewed");
@@ -445,7 +453,7 @@ mod tests {
 
         let (findings, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |name| {
             started.lock().unwrap().push(name.to_string())
-        }, None)
+        }, None, false)
         .await
         .unwrap();
 
@@ -454,6 +462,34 @@ mod tests {
         assert!(names.contains(&"Security"));
         assert!(names.contains(&"Bug Detection"));
         assert!(names.iter().any(|n| n.starts_with("Style")));
+    }
+
+    #[tokio::test]
+    async fn phpcs_active_drops_superseded_rules_from_llm() {
+        // When phpcs handles the deterministic Drupal rules, the LLM agents must
+        // be given fewer rules (the superseded ones removed), so the model stops
+        // checking what the linter does accurately.
+        let diffs = vec![make_file_diff("foo.module", FileStatus::Modified, "+<?php")];
+        let languages = BTreeSet::from([Language::Drupal]);
+        let config = Config::default();
+
+        let off = SequentialMockOllama::with_responses(vec![]);
+        let (_, runs_off) =
+            run_agents(&diffs, &languages, &config, "m", &off, |_| {}, None, false)
+                .await
+                .unwrap();
+        let total_off: usize = runs_off.iter().map(|r| r.rules_count).sum();
+
+        let on = SequentialMockOllama::with_responses(vec![]);
+        let (_, runs_on) = run_agents(&diffs, &languages, &config, "m", &on, |_| {}, None, true)
+            .await
+            .unwrap();
+        let total_on: usize = runs_on.iter().map(|r| r.rules_count).sum();
+
+        assert!(
+            total_on < total_off,
+            "phpcs_active should remove superseded rules from the LLM: off={total_off} on={total_on}"
+        );
     }
 
     #[tokio::test]
@@ -467,7 +503,7 @@ mod tests {
         let config = Config::default();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
             .await
             .unwrap();
 
@@ -482,7 +518,7 @@ mod tests {
         let config = Config::default();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
             .await
             .unwrap();
 
@@ -500,7 +536,7 @@ mod tests {
         let ollama =
             SequentialMockOllama::with_responses(vec![finding_json, finding_json, finding_json]);
 
-        let (findings, _) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
+        let (findings, _) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
             .await
             .unwrap();
 
@@ -524,7 +560,7 @@ custom_rules:
         .unwrap();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
             .await
             .unwrap();
 
@@ -539,7 +575,7 @@ custom_rules:
         let config = Config::default();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
             .await
             .unwrap();
 
@@ -598,7 +634,7 @@ agents:
         .unwrap();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
             .await
             .unwrap();
 
@@ -621,7 +657,7 @@ agents:
         .unwrap();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
             .await
             .unwrap();
 
@@ -648,7 +684,7 @@ agents:
         .unwrap();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
             .await
             .unwrap();
 
@@ -669,7 +705,7 @@ agents:
         // Security, Bug, Style(HTML), A11y, Twig = 5 agents
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
             .await
             .unwrap();
 
@@ -691,7 +727,7 @@ agents:
         let config = Config::default();
         let ollama = SequentialMockOllama::with_responses(vec!["[]", "[]", "[]"]);
 
-        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None)
+        let (_, runs) = run_agents(&diffs, &languages, &config, "test", &ollama, |_| {}, None, false)
             .await
             .unwrap();
 
