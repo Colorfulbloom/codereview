@@ -40,10 +40,22 @@ Tier 4 is for.
 4. Use the same model by default; allow `-m`-style override so a larger model
    can judge a smaller model's findings.
 
-**Why deferred:** it roughly doubles wall-clock time (one extra LLM call per
-finding or per file). On the reference hardware (MacBook Air M5 16GB, ~20 min
-for a 16-file module) that's too expensive to be default-on. Revisit once the
-Tier 1–3 precision numbers are known from real usage.
+**As shipped (where it diverged from the design above):** verification is
+**per-finding**, not grouped per file (point 1) — each finding is judged alone
+for maximum focus. It is **scoped to bug/security findings** (interpretation
+hallucinations cluster there; style and phpcs findings are skipped). The verdict
+prompt judges **presence, not importance** — `valid:false` is reserved for a
+genuine misread, so a real-but-minor finding is kept (this guardrail was added
+after a live run dropped a real "missing try/catch" on a relevance basis). The
+model override is the `verify_model` config key (point 4). Keep-on-uncertainty
+throughout: an errored, timed-out, or unparseable verdict keeps the finding.
+
+**Why opt-in, not default:** it roughly doubles wall-clock time (one extra LLM
+call per in-scope finding). On the reference hardware (MacBook Air M5 16GB)
+that's too expensive to run on every iteration, so it ships behind `--verify` /
+`verify: true`. The pass runs *after* the per-file cache, so an unchanged
+re-review still serves agent findings from cache and only spends new calls on
+the verify step (≈74s warm on the 16-file reference module vs. ≈20 min cold).
 
 **Prerequisite worth keeping:** the verdict prompt should reuse the evidence
 field that Tier 1 introduced — a finding that survived deterministic
