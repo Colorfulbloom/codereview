@@ -66,6 +66,10 @@ impl CommandRegistry {
                         name: "/init",
                         description: "Generate a .codereview.yaml for your project",
                     },
+                    SlashCommandEntry {
+                        name: "/clear-cache",
+                        description: "Clear the per-file review cache (forces a clean re-review)",
+                    },
                 ],
             },
             CommandSection {
@@ -133,8 +137,20 @@ mod tests {
         let names = registry.command_names();
 
         let expected = [
-            "/review", "/diff", "/rules", "/commit", "/config", "/output", "/models", "/onboard",
-            "/init", "/status", "/debug", "/help", "/quit",
+            "/review",
+            "/diff",
+            "/rules",
+            "/commit",
+            "/config",
+            "/output",
+            "/models",
+            "/onboard",
+            "/init",
+            "/clear-cache",
+            "/status",
+            "/debug",
+            "/help",
+            "/quit",
         ];
         for cmd in &expected {
             assert!(names.contains(cmd), "Missing command: {cmd}");
@@ -168,7 +184,7 @@ mod tests {
     #[test]
     fn command_names_count() {
         let registry = CommandRegistry::new();
-        assert_eq!(registry.command_names().len(), 13);
+        assert_eq!(registry.command_names().len(), 14);
     }
 
     #[test]

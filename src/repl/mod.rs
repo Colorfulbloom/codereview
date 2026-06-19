@@ -147,6 +147,7 @@ pub fn start(ctx: SessionContext) -> Result<()> {
                     "/onboard" => {
                         handle_onboard(&ctx);
                     }
+                    "/clear-cache" => handle_clear_cache(&ctx),
                     cmd if cmd.starts_with('/') => {
                         println!("Unknown command: {cmd}. Type /help for available commands.");
                     }
@@ -232,6 +233,12 @@ fn resolve_review_target<'a>(
             "'{arg}' is neither a file/directory nor a git ref.\n  Review existing code:      /review <path>\n  Review commits vs a base:  /review --diff <ref>"
         )),
     }
+}
+
+fn handle_clear_cache(ctx: &SessionContext) {
+    use crate::review::cache::{FindingCache, SqliteCache};
+    let removed = SqliteCache::new(ctx.db).clear();
+    println!("Cleared {removed} cached file review(s).");
 }
 
 fn handle_review(ctx: &SessionContext, target: ReviewTarget, verify: bool) {

@@ -10,6 +10,7 @@ use code_review::git::LiveGitAgent;
 use code_review::onboarding;
 use code_review::onboarding::progress::{OnboardingPersistence, SqliteOnboardingStore};
 use code_review::onboarding::state::StepData;
+use code_review::onboarding::steps::OllamaClient;
 use code_review::output::OutputFormatter;
 use code_review::output::annotations::AnnotationFormatter;
 use code_review::output::json::JsonFormatter;
@@ -60,7 +61,8 @@ fn run() -> Result<()> {
             code_review::onboarding::run::run_onboarding_interactive(&conn, &ollama, reset, &rt)
         }
         Some(Command::Init) => code_review::init::run_init(),
-        None if cli.diff.is_some() || cli.path.is_some() || cli.uncommitted => {
+        Some(Command::ClearCache) => clear_cache(&conn),
+        None if cli.diff.is_some() || cli.path.is_some() || cli.uncommitted || cli.agentic => {
             run_noninteractive(&cli, &conn, &project_root, &rt)
         }
         None => {
@@ -128,6 +130,13 @@ fn run_noninteractive(
         OutputFormat::Markdown => Box::new(MarkdownFormatter),
         OutputFormat::Annotations => Box::new(AnnotationFormatter),
     };
+
+    // --agentic is a different review shape entirely: the model explores the
+    // repo itself with tools, ignoring diffs/targets and all the deterministic
+    // gates. Branch early — it needs none of the diff/cache/phpcs/linter setup.
+    if cli.agentic {
+        return run_agentic(cli, project_root, &model, &ollama, formatter.as_ref(), rt);
+    }
 
     // --path wins over --diff; --uncommitted reviews the working tree.
     let target = if let Some(path) = cli.path.as_deref() {
@@ -219,6 +228,64 @@ fn run_noninteractive(
         print!("{output}");
     }
 
+    Ok(())
+}
+
+/// (Experimental) Agentic review: the model drives an explore-and-report loop
+/// over the repository instead of reviewing a diff. Findings are raw model
+/// output — none of the deterministic gates apply.
+fn run_agentic(
+    cli: &Cli,
+    project_root: &Path,
+    model: &str,
+    ollama: &runtime::LiveOllamaClient,
+    formatter: &dyn OutputFormatter,
+    rt: &tokio::runtime::Runtime,
+) -> Result<()> {
+    // Scope to --path if given (relative paths resolve under the project root);
+    // otherwise the agent explores the whole repo.
+    let root = match cli.path.as_deref() {
+        Some(p) => project_root.join(p),
+        None => project_root.to_path_buf(),
+    };
+    eprintln!(
+        "Agentic review (experimental) — model {model} exploring {}",
+        root.display()
+    );
+    eprintln!("Note: agentic findings bypass the deterministic gates; this is a spike.");
+
+    // Disable thinking on models that support it — otherwise the reasoning pass
+    // eats the turn and returns no tool call, stalling the loop. (Resolved once;
+    // `None` for non-thinking models, which must not receive the field.)
+    let think = if rt.block_on(ollama.model_supports_thinking(model)) {
+        Some(false)
+    } else {
+        None
+    };
+
+    let result = rt.block_on(code_review::agent::run::run_agentic_review(
+        root,
+        ollama,
+        model,
+        think,
+        &|event| eprintln!("  {event}"),
+    ))?;
+
+    let output = formatter.format(&result);
+    if let Some(ref output_path) = cli.output {
+        std::fs::write(output_path, &output)?;
+        eprintln!("Report written to: {output_path}");
+    } else {
+        print!("{output}");
+    }
+    Ok(())
+}
+
+/// Clear the per-file review cache for this project.
+fn clear_cache(conn: &rusqlite::Connection) -> Result<()> {
+    use code_review::review::cache::{FindingCache, SqliteCache};
+    let removed = SqliteCache::new(conn).clear();
+    println!("Cleared {removed} cached file review(s).");
     Ok(())
 }
 

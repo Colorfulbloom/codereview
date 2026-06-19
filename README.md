@@ -322,6 +322,7 @@ Launch the REPL with `code-review`. The prompt is `cr>`. Tab completion is suppo
 | `/models`  | List available Ollama models (shows active model) |
 | `/init`    | Generate a `.codereview.yaml` for your project    |
 | `/onboard` | Re-run the onboarding wizard                      |
+| `/clear-cache` | Clear the per-file review cache (forces a clean re-review) |
 
 ### Session
 
@@ -386,6 +387,7 @@ unaffected. On a terminal you get a live spinner; in CI logs, plain lines.
 | --------------------- | ----------------------------------------------------- |
 | `code-review onboard` | Run the onboarding wizard (`--reset` for fresh start) |
 | `code-review init`    | Generate `.codereview.yaml` interactively             |
+| `code-review clear-cache` | Clear the per-file review cache for this project  |
 
 ---
 

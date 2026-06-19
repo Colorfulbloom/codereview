@@ -34,6 +34,10 @@ pub trait FindingCache {
 
     /// Store the findings for one file under its key (empty = clean file).
     fn put(&self, key: &str, findings: &[ReviewFinding]);
+
+    /// Remove every cached entry; returns how many were removed. Forces a clean
+    /// re-review of unchanged files on the next pass.
+    fn clear(&self) -> usize;
 }
 
 /// The content of a file diff as sent to the LLM (all hunks concatenated).
@@ -80,6 +84,13 @@ impl FindingCache for MemoryCache {
             .borrow_mut()
             .insert(key.to_string(), findings.to_vec());
     }
+
+    fn clear(&self) -> usize {
+        let mut store = self.store.borrow_mut();
+        let removed = store.len();
+        store.clear();
+        removed
+    }
 }
 
 /// SQLite-backed cache living in the project's `state.db`.
@@ -115,6 +126,12 @@ impl FindingCache for SqliteCache<'_> {
                 rusqlite::params![key, json],
             );
         }
+    }
+
+    fn clear(&self) -> usize {
+        self.conn
+            .execute("DELETE FROM file_review_cache", [])
+            .unwrap_or(0)
     }
 }
 
@@ -195,6 +212,28 @@ mod tests {
         let hit = cache.get("clean");
         assert!(hit.is_some(), "clean file must be a hit");
         assert!(hit.unwrap().is_empty());
+    }
+
+    #[test]
+    fn memory_cache_clear_empties_and_reports_count() {
+        let cache = MemoryCache::default();
+        cache.put("a", &[finding("X")]);
+        cache.put("b", &[]); // a clean-file hit counts too
+        assert_eq!(cache.clear(), 2, "returns the number of entries removed");
+        assert!(cache.get("a").is_none());
+        assert!(cache.get("b").is_none());
+        assert_eq!(cache.clear(), 0, "clearing an already-empty cache removes nothing");
+    }
+
+    #[test]
+    fn sqlite_cache_clear_removes_all_rows() {
+        let conn = crate::db::init_in_memory().unwrap();
+        let cache = SqliteCache::new(&conn);
+        cache.put("a", &[finding("Y")]);
+        cache.put("b", &[]);
+        assert_eq!(cache.clear(), 2);
+        assert!(cache.get("a").is_none());
+        assert!(cache.get("b").is_none());
     }
 
     #[test]

@@ -9,6 +9,9 @@ use console::Style;
 use dialoguer::{Confirm, Input, MultiSelect, Password, Select};
 use indicatif::{ProgressBar, ProgressStyle};
 
+use code_review::agent::AgentError;
+use code_review::agent::client::{AgentChatClient, AgentMessage, AgentTurn};
+use code_review::agent::tools::{ToolCall, ToolDefinition};
 use code_review::onboarding::error::OnboardingError;
 use code_review::onboarding::steps::{
     FileSystem, GitContext, OllamaClient, SpinnerHandle, TerminalUi,
@@ -342,6 +345,95 @@ impl OllamaClient for LiveOllamaClient {
     }
 }
 
+#[async_trait]
+impl AgentChatClient for LiveOllamaClient {
+    async fn chat_turn(
+        &self,
+        model: &str,
+        messages: &[AgentMessage],
+        tools: &[ToolDefinition],
+        think: Option<bool>,
+    ) -> Result<AgentTurn, AgentError> {
+        let client = self
+            .chat_client()
+            .map_err(|e| AgentError::Chat(e.to_string()))?;
+
+        // Pre-serialize so the json! body can't silently drop a Serialize type.
+        let messages_json =
+            serde_json::to_value(messages).map_err(|e| AgentError::Chat(e.to_string()))?;
+        let tools_json =
+            serde_json::to_value(tools).map_err(|e| AgentError::Chat(e.to_string()))?;
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": messages_json,
+            "tools": tools_json,
+            "stream": false,                       // Ollama requires this with tools
+            "options": {
+                "temperature": 0.1,
+                // A real context budget: the exploration prompt (system + tool
+                // schema + several read files) overflows the small Ollama
+                // default, which truncates the tool-call generation mid-emit and
+                // 500s qwen's XML tool parser. Give it room.
+                "num_ctx": AGENTIC_NUM_CTX,
+                // Bound each turn's generation so a looping model fails bounded.
+                "num_predict": REVIEW_NUM_PREDICT,
+            },
+            // Keep the model resident across the iterate loop so each tool turn
+            // doesn't pay a reload.
+            "keep_alive": REVIEW_KEEP_ALIVE,
+        });
+        // Disable a thinking model's reasoning pass (only when supported —
+        // sending `think` to a non-thinking model is an Ollama error). Without
+        // this, qwen3.5 spends the turn thinking and returns an empty message
+        // with no tool call, stalling the loop.
+        if let Some(t) = think {
+            body["think"] = t.into();
+        }
+
+        let resp = client
+            .post("http://127.0.0.1:11434/api/chat")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                let msg = if e.is_timeout() {
+                    timeout_message(self.timeout_secs)
+                } else if e.is_connect() {
+                    "Cannot connect to Ollama. Is it running?".to_string()
+                } else {
+                    e.to_string()
+                };
+                code_review::logging::error(format!("agentic chat request failed: {msg}"));
+                AgentError::Chat(msg)
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(AgentError::Chat(format!(
+                "Ollama API error {status}: {body_text}"
+            )));
+        }
+
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| AgentError::Chat(e.to_string()))?;
+        let message = &json["message"];
+        let content = message["content"].as_str().unwrap_or("").to_string();
+        let tool_calls: Vec<ToolCall> = message
+            .get("tool_calls")
+            .filter(|v| !v.is_null())
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        Ok(AgentTurn {
+            content,
+            tool_calls,
+        })
+    }
+}
+
 /// Build the JSON body for an Ollama /api/chat request.
 ///
 /// `num_ctx` lands under `options`; `think` is a top-level field and is only
@@ -384,6 +476,13 @@ fn build_chat_body(
 
     body
 }
+
+/// Context window for agentic review turns. Larger than the chunked-review
+/// default because the exploration prompt accumulates the system prompt, the
+/// tool schema, and several read-in files; too small and Ollama truncates the
+/// tool call and 500s. Bounded to stay comfortably within 16GB on the reference
+/// machine with a 9B.
+const AGENTIC_NUM_CTX: usize = 16384;
 
 /// Hard cap on generation tokens for a review call. Sized for the prompt's
 /// "report only the 25 most important" limit (~150 tokens/finding); large

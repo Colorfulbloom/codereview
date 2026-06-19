@@ -41,6 +41,13 @@ pub struct Cli {
     #[arg(long)]
     pub verify: bool,
 
+    /// (Experimental) Agentic review: instead of reviewing a diff, the model
+    /// explores the repository itself with tools (list/read/search) and reports
+    /// what it finds. Reviews the whole repo, or `--path <dir>` if given.
+    /// Requires a tool-capable model; quality depends heavily on model size.
+    #[arg(long)]
+    pub agentic: bool,
+
     /// Output file path (for markdown/json formats).
     #[arg(long, short)]
     pub output: Option<String>,
@@ -64,6 +71,9 @@ pub enum Command {
     },
     /// Generate a .codereview.yaml configuration file for your project
     Init,
+    /// Clear the per-file review cache (forces a clean re-review of unchanged
+    /// files on the next run)
+    ClearCache,
 }
 
 #[cfg(test)]
@@ -130,9 +140,24 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_agentic_flag() {
+        let cli = Cli::parse_from(["code-review", "--agentic"]);
+        assert!(cli.agentic);
+
+        let cli = Cli::parse_from(["code-review"]);
+        assert!(!cli.agentic);
+    }
+
+    #[test]
     fn cli_parses_output_flag() {
         let cli = Cli::parse_from(["code-review", "--diff", "main", "-o", "report.md"]);
         assert_eq!(cli.output.as_deref(), Some("report.md"));
+    }
+
+    #[test]
+    fn cli_parses_clear_cache_subcommand() {
+        let cli = Cli::parse_from(["code-review", "clear-cache"]);
+        assert!(matches!(cli.command, Some(Command::ClearCache)));
     }
 
     #[test]

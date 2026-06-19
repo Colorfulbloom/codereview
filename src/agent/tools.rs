@@ -25,12 +25,16 @@ pub struct FunctionDefinition {
 }
 
 /// A tool call from the LLM.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// Derives `Serialize` too (not just `Deserialize`) because the agent loop
+/// echoes the assistant's `tool_calls` back into the next request's message
+/// history, which is what Ollama expects before a `tool` result message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub function: FunctionCall,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionCall {
     pub name: String,
     pub arguments: Value,
